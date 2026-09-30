@@ -1,0 +1,13 @@
+{
+    "feature_columns": [
+        "rain_percent",
+        "wind_speed_kmh",
+        "tof_distance_mm",
+        "om_temp",
+        "om_humidity",
+        "om_weather_code",
+        "rain_3p_avg",
+        "tof_delta"
+    ],
+    "lookback_steps": 8
+}

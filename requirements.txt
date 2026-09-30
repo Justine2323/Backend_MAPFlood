@@ -1,0 +1,9 @@
+tensorflow
+supabase
+pandas
+numpy
+scikit-learn
+joblib
+matplotlib
+seaborn
+python-dotenv
