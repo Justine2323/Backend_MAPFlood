@@ -329,20 +329,5 @@ def run_training_cycle():
 
 
 if __name__ == "__main__":
-    print("=====================================================")
-    print("Starting Continuous LSTM Prediction Engine")
-    print("=====================================================")
-    
-    while True:
-        try:
-            run_training_cycle()
-            minutes = SLEEP_INTERVAL_SECONDS // 60
-            print(f"\n[INFO] Sleeping for {minutes} minutes before the next cycle...")
-            time.sleep(SLEEP_INTERVAL_SECONDS)
-        except KeyboardInterrupt:
-            print("\n[INFO] Script stopped manually by user (Ctrl+C).")
-            break
-        except Exception as e:
-            print(f"\n[ERROR] An error occurred during the cycle: {e}")
-            print(f"[INFO] Retrying in 5 minutes...")
-            time.sleep(300)
+    print("Starting scheduled LSTM training and prediction cycle...")
+    run_training_cycle()
