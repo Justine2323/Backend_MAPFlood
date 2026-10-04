@@ -3,7 +3,8 @@
 Continuous LSTM Water Rise Regression Model - Barangay Tañong, Malabon City
 ================================================================================
 """
-
+import gc
+import tensorflow as tf
 import json
 import os
 import random
@@ -319,6 +320,12 @@ def run_training_cycle():
         json.dump(schema, f, indent=4)
 
     print(f"\n[SUCCESS] Cycle complete. Weights saved.")
+
+    # Clear Keras memory and force garbage collection
+    tf.keras.backend.clear_session()
+    gc.collect()
+
+    time.sleep(3600)
 
 
 if __name__ == "__main__":
