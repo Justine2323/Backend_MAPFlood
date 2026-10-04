@@ -67,3 +67,36 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Ignore Python cache & virtual env
+__pycache__/
+.venv/
+venv/
+
+# Ignore Machine Learning models & scalers
+*.keras
+*.joblib
+*.h5
+*.pkl
+
+# Ignore generated plot images
+*.png
+*.jpg
+
+# Ignore Python cache & virtual env
+__pycache__/
+.venv/
+venv/
+
+# Ignore Machine Learning models & scalers
+*.keras
+*.joblib
+*.h5
+*.pkl
+
+# Ignore generated plot images
+*.png
+*.jpg
+
+*.keras
+*.joblib
