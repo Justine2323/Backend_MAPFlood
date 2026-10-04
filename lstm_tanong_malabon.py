@@ -22,10 +22,11 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
 from supabase import create_client, Client
 
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.layers import BatchNormalization, Bidirectional, Dense, Dropout, Input, LSTM
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.regularizers import l2
+import keras
+from keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from keras.layers import BatchNormalization, Bidirectional, Dense, Dropout, Input, LSTM
+from keras.models import Sequential
+from keras.regularizers import l2
 
 # Reproducibility
 RANDOM_STATE = 42
@@ -67,20 +68,16 @@ LOOKBACK_STEPS = 8
 # ============================================================================
 # 1. DATA SEEDER & SUPABASE FETCHING
 # ============================================================================
-# ============================================================================
-# UPDATED DATA SEEDER WITH REALISTIC RECOVERY & DRAINAGE
-# ============================================================================
 def seed_tanong_data_from_open_meteo(supabase: Client):
     print(f"\n[AUTO-SEED] Clearing old table & seeding fresh cyclical weather data...")
     
-    # Optional: Delete existing imbalanced rows in Supabase before seeding
     try:
         supabase.table("sensor_data").delete().neq("id", 0).execute()
     except Exception as e:
         print(f"Notice during reset: {e}")
 
     end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d") # Expanded to 45 days
+    start_date = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
 
     url = (
         f"https://archive-api.open-meteo.com/v1/archive?"
@@ -117,25 +114,29 @@ def seed_tanong_data_from_open_meteo(supabase: Client):
 
         rain_pct = int(min(100, round(rain_mm * 12)))
 
-        # --- Balanced Drainage & Surge Physics ---
+        # Dynamic physics simulation
         if rain_mm > 5.0:
-            current_tof -= random.uniform(80.0, 160.0)  # Heavy rain / fast water rise
+            current_tof -= random.uniform(80.0, 160.0)
         elif rain_mm > 0.5:
-            current_tof -= random.uniform(20.0, 50.0)   # Moderate rain
+            current_tof -= random.uniform(20.0, 50.0)
         else:
-            # Active pumping & tidal drainage during dry hours
             if current_tof < 1900.0:
-                current_tof += random.uniform(70.0, 130.0) # Fast receding water
+                current_tof += random.uniform(70.0, 130.0)
             else:
-                current_tof += random.uniform(-10.0, 10.0) # Baseline jitter
+                current_tof += random.uniform(-10.0, 10.0)
 
-        # Keep TOF bounded between max flood (100mm) and dry bed (2000mm)
         current_tof = max(100.0, min(current_tof, 2000.0))
+        water_level_ft = max(0.0, (2000.0 - current_tof) / 304.8)
+        
+        # Calculate numerical predicted rise in ft
+        pred_rise_ft = round((rain_pct * 0.035) + (wind_speed * 0.010), 2)
 
         records.append({
             "rain_percent": rain_pct,
             "wind_speed_kmh": round(wind_speed, 2),
             "tof_distance_mm": round(current_tof, 2),
+            "water_level_ft": round(water_level_ft, 2),
+            "predicted_rise_ft": pred_rise_ft,
             "om_temp": round(temp, 2),
             "om_humidity": humidity,
             "om_weather_code": weather_code,
@@ -155,9 +156,6 @@ def seed_tanong_data_from_open_meteo(supabase: Client):
     print(f"✅ Re-seeded {inserted} multi-state historical records into Supabase!\n")
 
 
-# ============================================================================
-# UPDATED HEURISTIC LABELING BOUNDARIES
-# ============================================================================
 def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
     print("Connecting to Supabase database...")
     
@@ -186,6 +184,9 @@ def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
 
     df["rain_3p_avg"] = df["rain_percent"].rolling(window=3, min_periods=1).mean().round(2)
     df["tof_delta"] = df["tof_distance_mm"].diff().fillna(0.0).round(2)
+
+    # Calculate numerical predicted rise in ft
+    df["predicted_rise_ft"] = ((df["rain_3p_avg"] * 0.035) + (df["wind_speed_kmh"] * 0.010)).round(2)
 
     # Multi-class Heuristic Labels calibrated for urban drainage
     raw_risk = []
@@ -299,14 +300,18 @@ def plot_confusion_matrix_chart(y_true, y_pred, labels):
 # ============================================================================
 # 3. FEEDBACK TO SUPABASE (BATCHED UPSERT)
 # ============================================================================
-def push_predictions_to_supabase(supabase: Client, row_ids: list, y_pred: np.ndarray):
-    print("\nUpdating Supabase database with LSTM flood prediction feedback...")
+def push_predictions_to_supabase(supabase: Client, row_ids: list, y_pred: np.ndarray, df: pd.DataFrame):
+    print("\nUpdating Supabase database with LSTM flood prediction feedback & numeric rise...")
     
+    # Map calculated predicted_rise_ft by ID
+    rise_map = dict(zip(df["id"], df["predicted_rise_ft"]))
+
     payload = [
         {
             "id": int(r_id),
             "predicted_flood_risk": int(pred_code),
-            "prediction_label": CLASS_NAMES[pred_code]
+            "prediction_label": CLASS_NAMES[pred_code],
+            "predicted_rise_ft": float(rise_map.get(r_id, 0.0))
         }
         for r_id, pred_code in zip(row_ids, y_pred)
     ]
@@ -339,9 +344,7 @@ def main():
         pct = (count / len(df)) * 100 if len(df) > 0 else 0
         print(f"  - {cls_name}: {count} records ({pct:.1f}%)")
 
-    # ------------------------------------------------------------------------
-    # STRICT CHRONOLOGICAL SPLITTING (Prevents Time-Series Data Leakage)
-    # ------------------------------------------------------------------------
+    # Chronological Split
     train_ratio = 0.80
     split_idx = int(len(df) * train_ratio)
 
@@ -352,17 +355,14 @@ def main():
 
     scaler = StandardScaler()
 
-    # Fit scaler strictly on training set to prevent future data leakage
     X_train, y_train, train_ids = create_3d_sequences(df_train, scaler, fit_scaler=True)
     X_test, y_test, test_ids = create_3d_sequences(df_test, scaler, fit_scaler=False)
 
-    # Full set transform for final database updates
     X_all, y_all, all_row_ids = create_3d_sequences(df, scaler, fit_scaler=False)
 
     val_data = (X_test, y_test) if len(X_test) > 0 else None
     monitor_metric = "val_loss" if val_data else "loss"
 
-    # Compute class weights based strictly on training labels
     present_classes = np.unique(y_train)
     class_weight_dict = {0: 1.0, 1: 1.0, 2: 1.0}
     if len(present_classes) > 1:
@@ -411,7 +411,7 @@ def main():
     if len(X_all) > 0:
         all_pred_probs = model.predict(X_all)
         all_preds = np.argmax(all_pred_probs, axis=1)
-        push_predictions_to_supabase(supabase, all_row_ids, all_preds)
+        push_predictions_to_supabase(supabase, all_row_ids, all_preds, df)
 
     model.save(MODEL_PATH)
     joblib.dump(scaler, SCALER_PATH)
