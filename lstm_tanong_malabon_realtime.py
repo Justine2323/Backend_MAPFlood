@@ -4,7 +4,6 @@ Continuous LSTM Water Rise Regression Model - Barangay Tañong, Malabon City
 ================================================================================
 """
 import gc
-import tensorflow as tf
 import json
 import os
 import random
@@ -43,9 +42,9 @@ SCHEMA_PATH = os.path.join(BASE_DIR, "feature_schema.json")
 PLOT_HISTORY_PATH = os.path.join(BASE_DIR, "plot_training_history.png")
 PLOT_SCATTER_PATH = os.path.join(BASE_DIR, "plot_actual_vs_predicted.png")
 
-# Supabase Credentials
-SUPABASE_URL = "https://jqhimswayyurxymltrxn.supabase.co"
-SUPABASE_KEY = "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
+# Supabase Credentials loaded securely from environment variables
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://jqhimswayyurxymltrxn.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S")
 
 TANONG_LAT = 14.6542
 TANONG_LON = 120.9508
@@ -60,10 +59,9 @@ FEATURE_COLUMNS = [
     "rain_3p_avg",
     "tof_delta",
 ]
-# Targeting the continuous numerical rise
 TARGET_COLUMN = "predicted_rise_ft" 
 LOOKBACK_STEPS = 8
-SLEEP_INTERVAL_SECONDS = 3600  # Run every 1 hour continuously
+SLEEP_INTERVAL_SECONDS = 3600  # 1 hour sleep interval for local background mode
 
 
 # ============================================================================
@@ -72,19 +70,17 @@ SLEEP_INTERVAL_SECONDS = 3600  # Run every 1 hour continuously
 def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Fetching Supabase database...")
     
-    # Fetch up to 10k latest rows for long-term operation
     response = supabase.table("sensor_data").select("*").order("id", desc=True).limit(10000).execute()
     data = response.data
 
     if not data or len(data) < LOOKBACK_STEPS:
-        print("[WARNING] Not enough data in Supabase. Please ensure the ESP32 is sending data.")
+        print("[WARNING] Not enough data in Supabase. Ensure ESP32 is pushing data.")
         return pd.DataFrame()
 
     df = pd.DataFrame(data)
-    # Sort back to chronological for LSTM sequence generation
     df = df.sort_values(by="id", ascending=True).reset_index(drop=True)
 
-    # Fill missing values
+    # Missing value handling
     df["tof_distance_mm"] = df["tof_distance_mm"].ffill().fillna(2000.0)
     df["rain_percent"] = df["rain_percent"].fillna(0)
     df["wind_speed_kmh"] = df["wind_speed_kmh"].fillna(0.0)
@@ -99,11 +95,12 @@ def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
     df["rain_3p_avg"] = df["rain_percent"].rolling(window=3, min_periods=1).mean().round(2)
     df["tof_delta"] = df["tof_distance_mm"].diff().fillna(0.0).round(2)
 
-    # Ground truth baseline computation (what the model learns to predict)
+    # Target calculation baseline
     df["predicted_rise_ft"] = ((df["rain_3p_avg"] * 0.035) + (df["wind_speed_kmh"] * 0.010)).round(2)
 
     print(f"[INFO] Successfully loaded and preprocessed {len(df)} rows.")
     return df
+
 
 def create_3d_sequences(df: pd.DataFrame, scaler: StandardScaler, fit_scaler: bool = False):
     feature_data = df[FEATURE_COLUMNS].values
@@ -127,7 +124,7 @@ def create_3d_sequences(df: pd.DataFrame, scaler: StandardScaler, fit_scaler: bo
 
 
 # ============================================================================
-# 2. MODEL ARCHITECTURE (REGRESSION) & GRAPHING
+# 2. MODEL ARCHITECTURE & GRAPHING
 # ============================================================================
 def build_lstm_regression(input_shape) -> Sequential:
     model = Sequential([
@@ -141,7 +138,6 @@ def build_lstm_regression(input_shape) -> Sequential:
         Dense(32, activation="relu", kernel_regularizer=l2(0.001)),
         BatchNormalization(),
         Dropout(0.2),
-        # Single output neuron with Linear activation for exact float values (feet)
         Dense(1, activation="linear"),
     ])
 
@@ -154,7 +150,6 @@ def build_lstm_regression(input_shape) -> Sequential:
 
 
 def plot_regression_metrics(history, y_true, y_pred):
-    # 1. Training History Plot
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
     plt.plot(history.history['mae'], label='Train MAE', color='blue')
@@ -177,7 +172,6 @@ def plot_regression_metrics(history, y_true, y_pred):
     plt.savefig(PLOT_HISTORY_PATH, dpi=300)
     plt.close()
 
-    # 2. Actual vs Predicted Scatter Plot
     plt.figure(figsize=(8, 6))
     plt.scatter(y_true, y_pred, alpha=0.5, color='teal')
     plt.plot([min(y_true), max(y_true)], [min(y_true), max(y_true)], color='red', linestyle='--')
@@ -233,18 +227,17 @@ def push_predictions_to_supabase(supabase: Client, row_ids: list, y_pred: np.nda
 
 
 # ============================================================================
-# 4. MAIN PIPELINE (LONG-TERM EXECUTION LOOP)
+# 4. MAIN PIPELINE
 # ============================================================================
 def run_training_cycle():
-    print("\n--- Starting New Data Fetch and Training Cycle ---")
+    print("\n--- Starting Data Fetch and Training Cycle ---")
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     df = fetch_supabase_sensor_data(supabase)
 
     if df.empty:
-        print("[WARNING] DataFrame is empty. Aborting this cycle.")
+        print("[WARNING] DataFrame is empty. Aborting cycle.")
         return
 
-    # Chronological Split
     train_ratio = 0.85
     split_idx = int(len(df) * train_ratio)
 
@@ -253,7 +246,6 @@ def run_training_cycle():
 
     print(f"[INFO] Data Split: {len(df_train)} Train rows | {len(df_test)} Test rows")
 
-    # Handle Scaler Continuous loading
     if os.path.exists(SCALER_PATH):
         print("[INFO] Found existing scaler. Loading...")
         scaler = joblib.load(SCALER_PATH)
@@ -268,9 +260,8 @@ def run_training_cycle():
 
     val_data = (X_test, y_test) if len(X_test) > 0 else None
 
-    # Load existing model if operating long-term, otherwise build new
     if os.path.exists(MODEL_PATH):
-        print(f"\n[INFO] Found existing model at {MODEL_PATH}. Loading weights for continuous training...")
+        print(f"\n[INFO] Found existing model at {MODEL_PATH}. Loading weights...")
         model = load_model(MODEL_PATH)
     else:
         print("\n[INFO] No existing model found. Building new architecture...")
@@ -279,7 +270,7 @@ def run_training_cycle():
     early_stop = EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
     reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-5)
 
-    print("\n[INFO] --- Training / Fine-tuning LSTM Model ---")
+    print("\n[INFO] --- Fine-tuning LSTM Model ---")
     history = model.fit(
         X_train,
         y_train,
@@ -298,7 +289,7 @@ def run_training_cycle():
         r2 = r2_score(y_test, y_pred)
 
         print("\n" + "=" * 60)
-        print(f"REGRESSION EVALUATION METRICS")
+        print("REGRESSION EVALUATION METRICS")
         print("=" * 60)
         print(f"Mean Absolute Error (MAE) : {mae:.4f} ft")
         print(f"Mean Squared Error (MSE)  : {mse:.4f}")
@@ -306,12 +297,10 @@ def run_training_cycle():
         
         plot_regression_metrics(history, y_test, y_pred)
 
-    # Predict full sequence set & push continuous feedback to Supabase
     if len(X_all) > 0:
         all_preds = model.predict(X_all)
         push_predictions_to_supabase(supabase, all_row_ids, all_preds)
 
-    # Save progress for the next cycle
     model.save(MODEL_PATH)
     joblib.dump(scaler, SCALER_PATH)
 
@@ -319,15 +308,33 @@ def run_training_cycle():
     with open(SCHEMA_PATH, "w") as f:
         json.dump(schema, f, indent=4)
 
-    print(f"\n[SUCCESS] Cycle complete. Weights saved.")
+    print(f"\n[SUCCESS] Cycle complete. Artifacts saved.")
 
-    # Clear Keras memory and force garbage collection
     tf.keras.backend.clear_session()
     gc.collect()
 
-    time.sleep(3600)
-
 
 if __name__ == "__main__":
-    print("Starting scheduled LSTM training and prediction cycle...")
-    run_training_cycle()
+    print("=====================================================")
+    print("Starting Continuous LSTM Prediction Engine")
+    print("=====================================================")
+
+    # Set MODE = "SINGLE" for GitHub Actions / Cron
+    # Set MODE = "LOOP" for running locally 24/7 in terminal
+    EXECUTION_MODE = os.getenv("EXECUTION_MODE", "SINGLE")
+
+    if EXECUTION_MODE == "SINGLE":
+        run_training_cycle()
+    else:
+        while True:
+            try:
+                run_training_cycle()
+                minutes = SLEEP_INTERVAL_SECONDS // 60
+                print(f"\n[INFO] Sleeping for {minutes} minutes...")
+                time.sleep(SLEEP_INTERVAL_SECONDS)
+            except KeyboardInterrupt:
+                print("\n[INFO] Stopped by user.")
+                break
+            except Exception as e:
+                print(f"\n[ERROR] Exception encountered: {e}")
+                time.sleep(300)
