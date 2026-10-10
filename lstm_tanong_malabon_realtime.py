@@ -49,6 +49,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_
 TANONG_LAT = 14.6542
 TANONG_LON = 120.9508
 
+# Hardware & Model Target Configuration
+SENSOR_MOUNT_HEIGHT_MM = 2000.0  # Physical distance (mm) from sensor lens to dry baseline
+PREDICTION_HORIZON_STEPS = 2     # Predict water level shift N steps into the future (e.g. 2 hours)
+
 FEATURE_COLUMNS = [
     "rain_percent",
     "wind_speed_kmh",
@@ -73,8 +77,8 @@ def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
     response = supabase.table("sensor_data").select("*").order("id", desc=True).limit(10000).execute()
     data = response.data
 
-    if not data or len(data) < LOOKBACK_STEPS:
-        print("[WARNING] Not enough data in Supabase. Ensure ESP32 is pushing data.")
+    if not data or len(data) < (LOOKBACK_STEPS + PREDICTION_HORIZON_STEPS):
+        print("[WARNING] Not enough data in Supabase for training sequence + target shift. Ensure ESP32 is pushing data.")
         return pd.DataFrame()
 
     df = pd.DataFrame(data)
@@ -95,10 +99,22 @@ def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
     df["rain_3p_avg"] = df["rain_percent"].rolling(window=3, min_periods=1).mean().round(2)
     df["tof_delta"] = df["tof_distance_mm"].diff().fillna(0.0).round(2)
 
-    # Target calculation baseline
-    df["predicted_rise_ft"] = ((df["rain_3p_avg"] * 0.035) + (df["wind_speed_kmh"] * 0.010)).round(2)
+    # ------------------------------------------------------------------------
+    # REAL ML TARGET LOGIC (Physical Sensor Shift)
+    # ------------------------------------------------------------------------
+    # 1. Calculate actual current physical water level (feet above dry ground)
+    df["actual_water_level_ft"] = ((SENSOR_MOUNT_HEIGHT_MM - df["tof_distance_mm"]) / 304.8).clip(lower=0)
 
-    print(f"[INFO] Successfully loaded and preprocessed {len(df)} rows.")
+    # 2. Shift water levels into the future to establish ground-truth target
+    df["future_water_level_ft"] = df["actual_water_level_ft"].shift(-PREDICTION_HORIZON_STEPS)
+
+    # 3. Calculate target variable: Actual future water rise relative to current step
+    df[TARGET_COLUMN] = (df["future_water_level_ft"] - df["actual_water_level_ft"]).clip(lower=0).round(2)
+
+    # 4. Drop the trailing rows where future target cannot be known
+    df = df.dropna(subset=[TARGET_COLUMN]).reset_index(drop=True)
+
+    print(f"[INFO] Successfully loaded and preprocessed {len(df)} valid training rows.")
     return df
 
 
