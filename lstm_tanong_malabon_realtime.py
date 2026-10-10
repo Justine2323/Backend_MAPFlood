@@ -128,10 +128,14 @@ def create_3d_sequences(df: pd.DataFrame, scaler: StandardScaler, fit_scaler: bo
         scaled_features = scaler.transform(feature_data)
 
     X_seq, y_seq, row_ids = [], [], []
-    for i in range(len(df) - LOOKBACK_STEPS):
+    for i in range(len(df) - LOOKBACK_STEPS + 1):
+        # Window covers indices [i ... i + LOOKBACK_STEPS - 1]
         X_seq.append(scaled_features[i : i + LOOKBACK_STEPS])
-        y_seq.append(targets[i + LOOKBACK_STEPS])
-        row_ids.append(df["id"].iloc[i + LOOKBACK_STEPS])
+        
+        # Target and row ID belong to the end of the current lookback window
+        last_step_idx = i + LOOKBACK_STEPS - 1
+        y_seq.append(targets[last_step_idx])
+        row_ids.append(df["id"].iloc[last_step_idx])
 
     if len(X_seq) == 0:
         return np.empty((0, LOOKBACK_STEPS, len(FEATURE_COLUMNS))), np.empty((0,)), []
