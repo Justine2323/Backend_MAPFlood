@@ -99,19 +99,16 @@ def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
     df["rain_3p_avg"] = df["rain_percent"].rolling(window=3, min_periods=1).mean().round(2)
     df["tof_delta"] = df["tof_distance_mm"].diff().fillna(0.0).round(2)
 
-    # ------------------------------------------------------------------------
-    # REAL ML TARGET LOGIC (Physical Sensor Shift)
-    # ------------------------------------------------------------------------
-    # 1. Calculate actual current physical water level (feet above dry ground)
+    # Calculate actual current physical water level (feet above dry ground)
     df["actual_water_level_ft"] = ((SENSOR_MOUNT_HEIGHT_MM - df["tof_distance_mm"]) / 304.8).clip(lower=0)
 
-    # 2. Shift water levels into the future to establish ground-truth target
+    # Shift water levels into the future to establish ground-truth target
     df["future_water_level_ft"] = df["actual_water_level_ft"].shift(-PREDICTION_HORIZON_STEPS)
 
-    # 3. Calculate target variable: Actual future water rise relative to current step
+    # Target variable: Actual future water rise relative to current step
     df[TARGET_COLUMN] = (df["future_water_level_ft"] - df["actual_water_level_ft"]).clip(lower=0).round(2)
 
-    # 4. Drop the trailing rows where future target cannot be known
+    # Drop trailing rows where future target cannot be known
     df = df.dropna(subset=[TARGET_COLUMN]).reset_index(drop=True)
 
     print(f"[INFO] Successfully loaded and preprocessed {len(df)} valid training rows.")
@@ -129,10 +126,7 @@ def create_3d_sequences(df: pd.DataFrame, scaler: StandardScaler, fit_scaler: bo
 
     X_seq, y_seq, row_ids = [], [], []
     for i in range(len(df) - LOOKBACK_STEPS + 1):
-        # Window covers indices [i ... i + LOOKBACK_STEPS - 1]
         X_seq.append(scaled_features[i : i + LOOKBACK_STEPS])
-        
-        # Target and row ID belong to the end of the current lookback window
         last_step_idx = i + LOOKBACK_STEPS - 1
         y_seq.append(targets[last_step_idx])
         row_ids.append(df["id"].iloc[last_step_idx])
@@ -206,24 +200,27 @@ def plot_regression_metrics(history, y_true, y_pred):
 
 
 # ============================================================================
-# 3. FEEDBACK TO SUPABASE (BATCHED UPSERT)
+# 3. FEEDBACK TO SUPABASE (UPDATED 3.0 FT ALGORITHM)
 # ============================================================================
 def push_predictions_to_supabase(supabase: Client, row_ids: list, y_pred: np.ndarray):
-    print("\n[INFO] Updating Supabase database with exact LSTM predicted rise in feet...")
+    print("\n[INFO] Updating Supabase database with 3.0ft threshold predictions...")
     
     y_pred_flat = y_pred.flatten()
     payload = []
     
     for r_id, pred_rise in zip(row_ids, y_pred_flat):
-        if pred_rise >= 2.0:
+        # 3.0 ft + is DANGER LEVEL (RED)
+        if pred_rise >= 3.0:
             risk_code = 2
-            label = "Flood Alert (HIGH)"
-        elif pred_rise >= 1.0:
+            label = "DANGER ALERT (HIGH)"
+        # 1.5 ft to 2.99 ft is WARNING LEVEL (ORANGE)
+        elif pred_rise >= 1.5:
             risk_code = 1
-            label = "Warning (MODERATE)"
+            label = "WARNING (MODERATE)"
+        # Below 1.5 ft is ADVISORY / NORMAL (YELLOW)
         else:
             risk_code = 0
-            label = "Safe (LOW)"
+            label = "ADVISORY (LOW)"
 
         payload.append({
             "id": int(r_id),
@@ -339,8 +336,6 @@ if __name__ == "__main__":
     print("Starting Continuous LSTM Prediction Engine")
     print("=====================================================")
 
-    # Set MODE = "SINGLE" for GitHub Actions / Cron
-    # Set MODE = "LOOP" for running locally 24/7 in terminal
     EXECUTION_MODE = os.getenv("EXECUTION_MODE", "SINGLE")
 
     if EXECUTION_MODE == "SINGLE":

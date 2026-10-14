@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Barangay Tañong Flood Warning System</title>
+  <!-- Load Supabase Client SDK via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background: #0f172a; color: #fff; padding: 20px; }
+    .card { background: #1e293b; padding: 20px; border-radius: 12px; max-width: 450px; margin: 0 auto; }
+    .status-badge { display: inline-block; padding: 6px 12px; border-radius: 6px; font-weight: bold; }
+    .LOW { background: #16a34a; color: white; }
+    .MODERATE { background: #d97706; color: white; }
+    .HIGH { background: #dc2626; color: white; }
+    .metric { font-size: 1.2rem; margin: 10px 0; }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <h2>Barangay Tañong Flood Monitor</h2>
+    <div id="risk-badge" class="status-badge LOW">Loading...</div>
+    
+    <div class="metric">
+      <strong>Current Water Level:</strong> <span id="current-water">0.00</span> ft
+    </div>
+    <div class="metric">
+      <strong>Predicted 2-Hour Rise:</strong> <span id="predicted-rise">0.00</span> ft
+    </div>
+    <div class="metric">
+      <strong>Rain Intensity:</strong> <span id="rain">0</span>%
+    </div>
+    <div class="metric">
+      <strong>Wind Speed:</strong> <span id="wind">0.0</span> km/h
+    </div>
+    <small style="color: #94a3b8;">Last Updated: <span id="last-updated">--</span></small>
+  </div>
+
+  <script>
+    const SUPABASE_URL = "https://jqhimswayyurxymltrxn.supabase.co";
+    const SUPABASE_KEY = "YOUR_SUPABASE_ANON_KEY"; // Use your Anon/Public key
+    const client = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    // 1. Fetch the latest record on initial page load
+    async function loadLatestMetrics() {
+      const { data, error } = await client
+        .from('sensor_data')
+        .select('*')
+        .order('id', { ascending: false })
+        .limit(1);
+
+      if (data && data.length > 0) {
+        updateUI(data[0]);
+      }
+    }
+
+    // 2. Render data onto the HTML webpage
+    function updateUI(row) {
+      const currentWaterFt = ((2000.0 - (row.tof_distance_mm || 2000.0)) / 304.8).toFixed(2);
+      
+      document.getElementById('current-water').innerText = Math.max(0, currentWaterFt);
+      document.getElementById('predicted-rise').innerText = row.predicted_rise_ft ?? "0.00";
+      document.getElementById('rain').innerText = row.rain_percent ?? 0;
+      document.getElementById('wind').innerText = row.wind_speed_kmh ?? 0.0;
+      document.getElementById('last-updated').innerText = new Date().toLocaleTimeString();
+
+      const riskLabel = row.prediction_label ? row.prediction_label.toUpperCase() : "SAFE (LOW)";
+      const badge = document.getElementById('risk-badge');
+      badge.innerText = riskLabel;
+      
+      if (riskLabel.includes("HIGH")) badge.className = "status-badge HIGH";
+      else if (riskLabel.includes("MODERATE") || riskLabel.includes("WARNING")) badge.className = "status-badge MODERATE";
+      else badge.className = "status-badge LOW";
+    }
+
+    // 3. Subscribe to Realtime push events (Instant WebSockets update)
+    client
+      .channel('live_flood_data')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sensor_data' }, payload => {
+        if (payload.new) updateUI(payload.new);
+      })
+      .subscribe();
+
+    loadLatestMetrics();
+  </script>
+</body>
+</html>
