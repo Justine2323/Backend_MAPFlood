@@ -1,9 +1,6 @@
-tensorflow
+tensorflow-cpu
 supabase
 pandas
 numpy
 scikit-learn
 joblib
-matplotlib
-seaborn
-python-dotenv
