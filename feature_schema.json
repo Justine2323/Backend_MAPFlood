@@ -7,7 +7,10 @@
         "om_humidity",
         "om_weather_code",
         "rain_3p_avg",
-        "tof_delta"
+        "tof_delta",
+        "rain_6p_sum",
+        "water_velocity_3p",
+        "rain_wind_interaction"
     ],
     "lookback_steps": 8
 }
