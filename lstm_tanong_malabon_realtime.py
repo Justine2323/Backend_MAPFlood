@@ -103,7 +103,7 @@ def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Fetching Supabase database...")
 
     response = (
-        supabase.table("sensor_data")
+        supabase.table("StationA")
         .select("*")
         .order("id", desc=True)
         .limit(10000)
@@ -284,7 +284,7 @@ def push_predictions_to_supabase(supabase: Client, row_ids: list, y_pred: np.nda
     for i in range(0, len(payload), batch_size):
         batch = payload[i : i + batch_size]
         try:
-            supabase.table("sensor_data").upsert(batch).execute()
+            supabase.table("StationA").upsert(batch).execute()
             updated_count += len(batch)
         except Exception as e:
             print(f"[ERROR] Failed to upsert batch starting at index {i}: {e}")
