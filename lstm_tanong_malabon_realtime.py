@@ -1,7 +1,7 @@
 """
 ================================================================================
 Continuous LSTM Water Rise Regression Model - Barangay Tañong, Malabon City
-Target Supabase Table: StationA
+Target Supabase Table: Station A
 ================================================================================
 """
 import gc
@@ -101,10 +101,10 @@ def asymmetric_mse(y_true, y_pred):
 # 1. DATA SEEDER & SUPABASE FETCHING
 # ============================================================================
 def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Fetching Supabase database (StationA)...")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Fetching Supabase database (Station A)...")
 
     response = (
-        supabase.table("StationA")
+        supabase.table("Station A")
         .select("*")
         .order("id", desc=True)
         .limit(10000)
@@ -285,7 +285,7 @@ def push_predictions_to_supabase(supabase: Client, row_ids: list, y_pred: np.nda
     for i in range(0, len(payload), batch_size):
         batch = payload[i : i + batch_size]
         try:
-            supabase.table("StationA").upsert(batch).execute()
+            supabase.table("Station A").upsert(batch).execute()
             updated_count += len(batch)
         except Exception as e:
             print(f"[ERROR] Failed to upsert batch starting at index {i}: {e}")
