@@ -349,56 +349,15 @@ def run_training_cycle():
 
     if len(X_test) > 0:
         y_pred = model.predict(X_test)
+        y_pred_flat = y_pred.flatten()
 
-        mae = mean_absolute_error(y_test, y_pred)
-        mse = mean_squared_error(y_test, y_pred)
-        r2 = r2_score(y_test, y_pred)
+        mae = mean_absolute_error(y_test, y_pred_flat)
+        mse = mean_squared_error(y_test, y_pred_flat)
+        r2 = r2_score(y_test, y_pred_flat)
+
+        # Calculate Tolerance Accuracy (Percentage within acceptable margins)
+        abs_errors = np.abs(y_test - y_pred_flat)
+        acc_within_0_25 = np.mean(abs_errors <= 0.25) * 100
+        acc_within_0_50 = np.mean(abs_errors <= 0.50) * 100
 
         print("\n" + "=" * 60)
-        print("REGRESSION EVALUATION METRICS")
-        print("=" * 60)
-        print(f"Mean Absolute Error (MAE) : {mae:.4f} ft")
-        print(f"Mean Squared Error (MSE)  : {mse:.4f}")
-        print(f"R2 Score                  : {r2:.4f}")
-
-        plot_regression_metrics(history, y_test, y_pred)
-
-    if len(X_all) > 0:
-        all_preds = model.predict(X_all)
-        push_predictions_to_supabase(supabase, all_row_ids, all_preds)
-
-    model.save(MODEL_PATH)
-    joblib.dump(scaler, SCALER_PATH)
-
-    schema = {"feature_columns": FEATURE_COLUMNS, "lookback_steps": LOOKBACK_STEPS}
-    with open(SCHEMA_PATH, "w") as f:
-        json.dump(schema, f, indent=4)
-
-    print("\n[SUCCESS] Cycle complete. Artifacts saved.")
-
-    tf.keras.backend.clear_session()
-    gc.collect()
-
-
-if __name__ == "__main__":
-    print("=====================================================")
-    print("Starting Continuous LSTM Prediction Engine")
-    print("=====================================================")
-
-    EXECUTION_MODE = os.getenv("EXECUTION_MODE", "SINGLE")
-
-    if EXECUTION_MODE == "SINGLE":
-        run_training_cycle()
-    else:
-        while True:
-            try:
-                run_training_cycle()
-                minutes = SLEEP_INTERVAL_SECONDS // 60
-                print(f"\n[INFO] Sleeping for {minutes} minutes...")
-                time.sleep(SLEEP_INTERVAL_SECONDS)
-            except KeyboardInterrupt:
-                print("\n[INFO] Stopped by user.")
-                break
-            except Exception as e:
-                print(f"\n[ERROR] Exception encountered: {e}")
-                time.sleep(300)
