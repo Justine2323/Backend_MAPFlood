@@ -1,6 +1,7 @@
 """
 ================================================================================
 Continuous LSTM Water Rise Regression Model - Barangay Tañong, Malabon City
+Target Supabase Table: StationA
 ================================================================================
 """
 import gc
@@ -100,7 +101,7 @@ def asymmetric_mse(y_true, y_pred):
 # 1. DATA SEEDER & SUPABASE FETCHING
 # ============================================================================
 def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Fetching Supabase database...")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Fetching Supabase database (StationA)...")
 
     response = (
         supabase.table("StationA")
@@ -312,14 +313,28 @@ def run_training_cycle():
 
     print(f"[INFO] Data Split: {len(df_train)} Train rows | {len(df_test)} Test rows")
 
+    # --- AUTOMATIC SCALER & MODEL RE-CALIBRATION SAFEGUARD ---
+    need_new_scaler = True
     if os.path.exists(SCALER_PATH):
-        print("[INFO] Found existing scaler. Loading...")
-        scaler = joblib.load(SCALER_PATH)
-        X_train, y_train, train_ids = create_3d_sequences(df_train, scaler, fit_scaler=False)
-    else:
-        print("[INFO] No existing scaler found. Fitting new scaler...")
+        try:
+            scaler = joblib.load(SCALER_PATH)
+            if hasattr(scaler, "n_features_in_") and scaler.n_features_in_ == len(FEATURE_COLUMNS):
+                print("[INFO] Found valid matching scaler. Loading...")
+                X_train, y_train, train_ids = create_3d_sequences(df_train, scaler, fit_scaler=False)
+                need_new_scaler = False
+            else:
+                print(f"[WARNING] Saved scaler feature count ({getattr(scaler, 'n_features_in_', 'Unknown')}) does not match current feature count ({len(FEATURE_COLUMNS)}). Rebuilding scaler...")
+        except Exception as e:
+            print(f"[WARNING] Scaler load failed ({e}). Rebuilding...")
+
+    if need_new_scaler:
+        print("[INFO] Fitting fresh StandardScaler for 11 features...")
         scaler = StandardScaler()
         X_train, y_train, train_ids = create_3d_sequences(df_train, scaler, fit_scaler=True)
+        joblib.dump(scaler, SCALER_PATH)
+        # Force model rebuild if scaler was invalidated
+        if os.path.exists(MODEL_PATH):
+            os.remove(MODEL_PATH)
 
     X_test, y_test, test_ids = create_3d_sequences(df_test, scaler, fit_scaler=False)
     X_all, y_all, all_row_ids = create_3d_sequences(df, scaler, fit_scaler=False)
@@ -328,9 +343,13 @@ def run_training_cycle():
 
     if os.path.exists(MODEL_PATH):
         print(f"\n[INFO] Found existing model at {MODEL_PATH}. Loading weights...")
-        model = load_model(MODEL_PATH, custom_objects={"asymmetric_mse": asymmetric_mse})
+        try:
+            model = load_model(MODEL_PATH, custom_objects={"asymmetric_mse": asymmetric_mse})
+        except Exception as e:
+            print(f"[WARNING] Could not load existing model architecture ({e}). Rebuilding new model...")
+            model = build_lstm_regression(input_shape=(X_train.shape[1], X_train.shape[2]))
     else:
-        print("\n[INFO] No existing model found. Building new architecture...")
+        print("\n[INFO] Building new architecture for 11 features...")
         model = build_lstm_regression(input_shape=(X_train.shape[1], X_train.shape[2]))
 
     early_stop = EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
@@ -347,31 +366,46 @@ def run_training_cycle():
         verbose=1,
     )
 
+    # --- EVALUATION ON TRAIN & TEST SETS ---
+    print("\n" + "=" * 60)
+    print("LSTM REGRESSION ACCURACY EVALUATION METRICS")
+    print("=" * 60)
+
+    # 1. Train Performance
+    y_train_pred = model.predict(X_train).flatten()
+    train_mae = mean_absolute_error(y_train, y_train_pred)
+    train_abs_err = np.abs(y_train - y_train_pred)
+    train_acc_3in = np.mean(train_abs_err <= 0.25) * 100
+    train_acc_6in = np.mean(train_abs_err <= 0.50) * 100
+
+    print("--- TRAINING SET PERFORMANCE ---")
+    print(f"Train MAE                      : {train_mae:.4f} ft")
+    print(f"Train Accuracy (within 3 in)   : {train_acc_3in:.2f}%")
+    print(f"Train Accuracy (within 6 in)   : {train_acc_6in:.2f}%")
+
+    # 2. Test / Validation Performance
     if len(X_test) > 0:
-        y_pred = model.predict(X_test)
-        y_pred_flat = y_pred.flatten()
+        y_test_pred = model.predict(X_test).flatten()
 
-        mae = mean_absolute_error(y_test, y_pred_flat)
-        mse = mean_squared_error(y_test, y_pred_flat)
-        r2 = r2_score(y_test, y_pred_flat)
+        test_mae = mean_absolute_error(y_test, y_test_pred)
+        test_mse = mean_squared_error(y_test, y_test_pred)
+        test_r2 = r2_score(y_test, y_test_pred)
 
-        # Calculate Tolerance Accuracy (Percentage within acceptable margins)
-        abs_errors = np.abs(y_test - y_pred_flat)
-        acc_within_0_25 = np.mean(abs_errors <= 0.25) * 100
-        acc_within_0_50 = np.mean(abs_errors <= 0.50) * 100
+        test_abs_err = np.abs(y_test - y_test_pred)
+        test_acc_3in = np.mean(test_abs_err <= 0.25) * 100
+        test_acc_6in = np.mean(test_abs_err <= 0.50) * 100
 
-        print("\n" + "=" * 60)
-        print("REGRESSION EVALUATION METRICS")
-        print("=" * 60)
-        print(f"Mean Absolute Error (MAE) : {mae:.4f} ft")
-        print(f"Mean Squared Error (MSE)  : {mse:.4f}")
-        print(f"R2 Score                  : {r2:.4f}")
+        print("\n--- TEST / VALIDATION SET PERFORMANCE ---")
+        print(f"Test Mean Absolute Error (MAE) : {test_mae:.4f} ft")
+        print(f"Test Mean Squared Error (MSE)  : {test_mse:.4f}")
+        print(f"Test R2 Score                  : {test_r2:.4f}")
         print("-" * 60)
-        print(f"Accuracy (within 0.25 ft / 3 in) : {acc_within_0_25:.2f}%")
-        print(f"Accuracy (within 0.50 ft / 6 in) : {acc_within_0_50:.2f}%")
-        print("=" * 60)
+        print(f"Test Accuracy (within 3 in / 0.25 ft) : {test_acc_3in:.2f}%")
+        print(f"Test Accuracy (within 6 in / 0.50 ft) : {test_acc_6in:.2f}%")
 
-        plot_regression_metrics(history, y_test, y_pred)
+        plot_regression_metrics(history, y_test, y_test_pred)
+
+    print("=" * 60)
 
     if len(X_all) > 0:
         all_preds = model.predict(X_all)
