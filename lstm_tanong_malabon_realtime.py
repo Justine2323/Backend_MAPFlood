@@ -22,10 +22,18 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from supabase import create_client, Client
 
-# Correct direct Keras imports for TF 2.21+ / Keras 3
+# Correct Keras 3 / TensorFlow imports
 import keras
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from keras.layers import BatchNormalization, Bidirectional, Dense, Dropout, Input, LSTM
+from keras.layers import (
+    BatchNormalization,
+    Bidirectional,
+    Dense,
+    Dropout,
+    Input,
+    LSTM,
+    LayerNormalization,
+)
 from keras.models import Sequential, load_model
 from keras.regularizers import l2
 
@@ -42,16 +50,19 @@ SCHEMA_PATH = os.path.join(BASE_DIR, "feature_schema.json")
 PLOT_HISTORY_PATH = os.path.join(BASE_DIR, "plot_training_history.png")
 PLOT_SCATTER_PATH = os.path.join(BASE_DIR, "plot_actual_vs_predicted.png")
 
-# Supabase Credentials loaded securely from environment variables
+# Supabase Credentials
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://jqhimswayyurxymltrxn.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S")
+SUPABASE_KEY = os.getenv(
+    "SUPABASE_KEY",
+    "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S",
+)
 
 TANONG_LAT = 14.6542
 TANONG_LON = 120.9508
 
-# Hardware & Model Target Configuration
-SENSOR_MOUNT_HEIGHT_MM = 2000.0  # Physical distance (mm) from sensor lens to dry baseline
-PREDICTION_HORIZON_STEPS = 2     # Predict water level shift N steps into the future (e.g. 2 hours)
+# Hardware & Model Target Configuration (6.0 ft baseline height)
+SENSOR_MOUNT_HEIGHT_MM = 1828.8  # Physical distance (mm) from sensor lens to dry baseline (6.0 ft)
+PREDICTION_HORIZON_STEPS = 2     # Predict water level shift N steps into the future
 
 FEATURE_COLUMNS = [
     "rain_percent",
@@ -62,10 +73,27 @@ FEATURE_COLUMNS = [
     "om_weather_code",
     "rain_3p_avg",
     "tof_delta",
+    "rain_6p_sum",
+    "water_velocity_3p",
+    "rain_wind_interaction",
 ]
-TARGET_COLUMN = "predicted_rise_ft" 
+TARGET_COLUMN = "predicted_rise_ft"
 LOOKBACK_STEPS = 8
-SLEEP_INTERVAL_SECONDS = 3600  # 1 hour sleep interval for local background mode
+SLEEP_INTERVAL_SECONDS = 3600  # 1 hour sleep interval for background mode
+
+
+# ============================================================================
+# 0. CUSTOM ASYMMETRIC LOSS FUNCTION
+# ============================================================================
+@keras.saving.register_keras_serializable(package="Custom")
+def asymmetric_mse(y_true, y_pred):
+    """
+    Custom Loss Function: Applies a 3.5x penalty multiplier when actual rise
+    exceeds predicted rise (under-prediction), dramatically reducing false negatives.
+    """
+    error = y_true - y_pred
+    weight = tf.where(error > 0, 3.5, 1.0)
+    return tf.reduce_mean(weight * tf.square(error))
 
 
 # ============================================================================
@@ -73,19 +101,27 @@ SLEEP_INTERVAL_SECONDS = 3600  # 1 hour sleep interval for local background mode
 # ============================================================================
 def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Fetching Supabase database...")
-    
-    response = supabase.table("sensor_data").select("*").order("id", desc=True).limit(10000).execute()
+
+    response = (
+        supabase.table("sensor_data")
+        .select("*")
+        .order("id", desc=True)
+        .limit(10000)
+        .execute()
+    )
     data = response.data
 
     if not data or len(data) < (LOOKBACK_STEPS + PREDICTION_HORIZON_STEPS):
-        print("[WARNING] Not enough data in Supabase for training sequence + target shift. Ensure ESP32 is pushing data.")
+        print(
+            "[WARNING] Not enough data in Supabase for training sequence + target shift. Ensure ESP32 is pushing data."
+        )
         return pd.DataFrame()
 
     df = pd.DataFrame(data)
     df = df.sort_values(by="id", ascending=True).reset_index(drop=True)
 
     # Missing value handling
-    df["tof_distance_mm"] = df["tof_distance_mm"].ffill().fillna(2000.0)
+    df["tof_distance_mm"] = df["tof_distance_mm"].ffill().fillna(SENSOR_MOUNT_HEIGHT_MM)
     df["rain_percent"] = df["rain_percent"].fillna(0)
     df["wind_speed_kmh"] = df["wind_speed_kmh"].fillna(0.0)
     df["om_temp"] = df["om_temp"].fillna(30.0)
@@ -93,14 +129,23 @@ def fetch_supabase_sensor_data(supabase: Client) -> pd.DataFrame:
     df["om_weather_code"] = df["om_weather_code"].fillna(0)
 
     if "status" in df.columns:
-        clear_mask = df["status"].astype(str).str.upper().str.contains("CLEAR|DRY|NORMAL", na=False)
+        clear_mask = (
+            df["status"]
+            .astype(str)
+            .str.upper()
+            .str.contains("CLEAR|DRY|NORMAL", na=False)
+        )
         df.loc[clear_mask, "rain_percent"] = 0
 
+    # Primary rolling & derived features
     df["rain_3p_avg"] = df["rain_percent"].rolling(window=3, min_periods=1).mean().round(2)
     df["tof_delta"] = df["tof_distance_mm"].diff().fillna(0.0).round(2)
 
-    # Calculate actual current physical water level (feet above dry ground)
+    # Enhanced trend features
+    df["rain_6p_sum"] = df["rain_percent"].rolling(window=6, min_periods=1).sum().round(2)
     df["actual_water_level_ft"] = ((SENSOR_MOUNT_HEIGHT_MM - df["tof_distance_mm"]) / 304.8).clip(lower=0)
+    df["water_velocity_3p"] = df["actual_water_level_ft"].diff(3).fillna(0.0).round(2)
+    df["rain_wind_interaction"] = ((df["rain_percent"] / 100.0) * df["wind_speed_kmh"]).round(2)
 
     # Shift water levels into the future to establish ground-truth target
     df["future_water_level_ft"] = df["actual_water_level_ft"].shift(-PREDICTION_HORIZON_STEPS)
@@ -143,22 +188,22 @@ def create_3d_sequences(df: pd.DataFrame, scaler: StandardScaler, fit_scaler: bo
 def build_lstm_regression(input_shape) -> Sequential:
     model = Sequential([
         Input(shape=input_shape),
-        Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=l2(0.001))),
-        BatchNormalization(),
+        Bidirectional(LSTM(64, return_sequences=True, recurrent_dropout=0.1, kernel_regularizer=l2(0.001))),
+        LayerNormalization(),
         Dropout(0.25),
-        Bidirectional(LSTM(32, return_sequences=False, kernel_regularizer=l2(0.001))),
-        BatchNormalization(),
+        Bidirectional(LSTM(32, return_sequences=False, recurrent_dropout=0.1, kernel_regularizer=l2(0.001))),
+        LayerNormalization(),
         Dropout(0.25),
         Dense(32, activation="relu", kernel_regularizer=l2(0.001)),
-        BatchNormalization(),
+        LayerNormalization(),
         Dropout(0.2),
         Dense(1, activation="linear"),
     ])
 
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=0.001),
-        loss="mse",  
-        metrics=["mae"], 
+        loss=asymmetric_mse,
+        metrics=["mae"],
     )
     return model
 
@@ -166,33 +211,33 @@ def build_lstm_regression(input_shape) -> Sequential:
 def plot_regression_metrics(history, y_true, y_pred):
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
-    plt.plot(history.history['mae'], label='Train MAE', color='blue')
-    if 'val_mae' in history.history:
-        plt.plot(history.history['val_mae'], label='Validation MAE', color='orange')
-    plt.title('LSTM Model Error (Feet)')
-    plt.ylabel('Mean Absolute Error (ft)')
-    plt.xlabel('Epoch')
+    plt.plot(history.history["mae"], label="Train MAE", color="blue")
+    if "val_mae" in history.history:
+        plt.plot(history.history["val_mae"], label="Validation MAE", color="orange")
+    plt.title("LSTM Model Error (Feet)")
+    plt.ylabel("Mean Absolute Error (ft)")
+    plt.xlabel("Epoch")
     plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.grid(True, linestyle="--", alpha=0.6)
 
     plt.subplot(1, 2, 2)
-    plt.plot(history.history['loss'], label='Train Loss (MSE)', color='blue')
-    if 'val_loss' in history.history:
-        plt.plot(history.history['val_loss'], label='Val Loss (MSE)', color='orange')
-    plt.title('LSTM Model Loss')
+    plt.plot(history.history["loss"], label="Train Loss (Asymmetric MSE)", color="blue")
+    if "val_loss" in history.history:
+        plt.plot(history.history["val_loss"], label="Val Loss (Asymmetric MSE)", color="orange")
+    plt.title("LSTM Model Loss")
     plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.grid(True, linestyle="--", alpha=0.6)
     plt.tight_layout()
     plt.savefig(PLOT_HISTORY_PATH, dpi=300)
     plt.close()
 
     plt.figure(figsize=(8, 6))
-    plt.scatter(y_true, y_pred, alpha=0.5, color='teal')
-    plt.plot([min(y_true), max(y_true)], [min(y_true), max(y_true)], color='red', linestyle='--')
-    plt.title('Actual vs Predicted Water Rise (ft)')
-    plt.xlabel('Actual Rise (ft)')
-    plt.ylabel('Predicted Rise (ft)')
-    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.scatter(y_true, y_pred, alpha=0.5, color="teal")
+    plt.plot([min(y_true), max(y_true)], [min(y_true), max(y_true)], color="red", linestyle="--")
+    plt.title("Actual vs Predicted Water Rise (ft)")
+    plt.xlabel("Actual Rise (ft)")
+    plt.ylabel("Predicted Rise (ft)")
+    plt.grid(True, linestyle="--", alpha=0.6)
     plt.tight_layout()
     plt.savefig(PLOT_SCATTER_PATH, dpi=300)
     plt.close()
@@ -200,33 +245,37 @@ def plot_regression_metrics(history, y_true, y_pred):
 
 
 # ============================================================================
-# 3. FEEDBACK TO SUPABASE (UPDATED 3.0 FT ALGORITHM)
+# 3. FEEDBACK TO SUPABASE (4-TIER ALIGNMENT: GREEN, YELLOW, ORANGE, RED)
 # ============================================================================
 def push_predictions_to_supabase(supabase: Client, row_ids: list, y_pred: np.ndarray):
-    print("\n[INFO] Updating Supabase database with 3.0ft threshold predictions...")
-    
+    print("\n[INFO] Updating Supabase database with 4-tier threshold predictions...")
+
     y_pred_flat = y_pred.flatten()
     payload = []
-    
+
     for r_id, pred_rise in zip(row_ids, y_pred_flat):
-        # 3.0 ft + is DANGER LEVEL (RED)
+        # 3.0 ft+ is DANGER LEVEL (RED / SIREN)
         if pred_rise >= 3.0:
+            risk_code = 3
+            label = "DANGER ALERT (RED)"
+        # 2.0 ft to 2.99 ft is ALERT LEVEL (ORANGE)
+        elif pred_rise >= 2.0:
             risk_code = 2
-            label = "DANGER ALERT (HIGH)"
-        # 1.5 ft to 2.99 ft is WARNING LEVEL (ORANGE)
-        elif pred_rise >= 1.5:
+            label = "ALERT (ORANGE)"
+        # 1.0 ft to 1.99 ft is WARNING LEVEL (YELLOW)
+        elif pred_rise >= 1.0:
             risk_code = 1
-            label = "WARNING (MODERATE)"
-        # Below 1.5 ft is ADVISORY / NORMAL (YELLOW)
+            label = "WARNING (YELLOW)"
+        # Below 1.0 ft is SAFE (GREEN)
         else:
             risk_code = 0
-            label = "ADVISORY (LOW)"
+            label = "SAFE (GREEN)"
 
         payload.append({
             "id": int(r_id),
             "predicted_rise_ft": round(float(pred_rise), 2),
             "predicted_flood_risk": risk_code,
-            "prediction_label": label
+            "prediction_label": label,
         })
 
     batch_size = 200
@@ -279,7 +328,7 @@ def run_training_cycle():
 
     if os.path.exists(MODEL_PATH):
         print(f"\n[INFO] Found existing model at {MODEL_PATH}. Loading weights...")
-        model = load_model(MODEL_PATH)
+        model = load_model(MODEL_PATH, custom_objects={"asymmetric_mse": asymmetric_mse})
     else:
         print("\n[INFO] No existing model found. Building new architecture...")
         model = build_lstm_regression(input_shape=(X_train.shape[1], X_train.shape[2]))
@@ -292,7 +341,7 @@ def run_training_cycle():
         X_train,
         y_train,
         validation_data=val_data,
-        epochs=15, 
+        epochs=15,
         batch_size=16,
         callbacks=[early_stop, reduce_lr],
         verbose=1,
@@ -300,7 +349,7 @@ def run_training_cycle():
 
     if len(X_test) > 0:
         y_pred = model.predict(X_test)
-        
+
         mae = mean_absolute_error(y_test, y_pred)
         mse = mean_squared_error(y_test, y_pred)
         r2 = r2_score(y_test, y_pred)
@@ -311,7 +360,7 @@ def run_training_cycle():
         print(f"Mean Absolute Error (MAE) : {mae:.4f} ft")
         print(f"Mean Squared Error (MSE)  : {mse:.4f}")
         print(f"R2 Score                  : {r2:.4f}")
-        
+
         plot_regression_metrics(history, y_test, y_pred)
 
     if len(X_all) > 0:
@@ -325,7 +374,7 @@ def run_training_cycle():
     with open(SCHEMA_PATH, "w") as f:
         json.dump(schema, f, indent=4)
 
-    print(f"\n[SUCCESS] Cycle complete. Artifacts saved.")
+    print("\n[SUCCESS] Cycle complete. Artifacts saved.")
 
     tf.keras.backend.clear_session()
     gc.collect()
