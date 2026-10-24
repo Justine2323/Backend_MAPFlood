@@ -5,10 +5,10 @@ Station C - Optical Water Telemetry & Video Feed (Raspberry Pi 5)
 """
 import threading
 import time
-import cv2
-from flask import Flask, Response, render_template_string
-import numpy as np
-from supabase import Client, create_client
+import cv2 # type: ignore
+from flask import Flask, Response, render_template_string # type: ignore
+import numpy as np # type: ignore
+from supabase import Client, create_client # type: ignore
 
 # --- SUPABASE CONFIGURATION ---
 SUPABASE_URL = "https://jqhimswayyurxymltrxn.supabase.co"
