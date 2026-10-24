@@ -1,0 +1,16 @@
+{
+    "feature_columns": [
+        "rain_percent",
+        "wind_speed_kmh",
+        "camera_water_level_ft",
+        "om_temp",
+        "om_humidity",
+        "om_weather_code",
+        "rain_3p_avg",
+        "level_delta",
+        "rain_6p_sum",
+        "water_velocity_3p",
+        "rain_wind_interaction"
+    ],
+    "lookback_steps": 8
+}
