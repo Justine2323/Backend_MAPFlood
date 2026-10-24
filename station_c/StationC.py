@@ -6,8 +6,8 @@ import time
 from supabase import create_client, Client
 
 # --- SUPABASE CONFIGURATION ---
-SUPABASE_URL = "https://your-project-url.supabase.co"
-SUPABASE_KEY = "your-anon-key"
+SUPABASE_URL = "https://jqhimswayyurxymltrxn.supabase.co"
+SUPABASE_KEY = "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = Flask(__name__)
