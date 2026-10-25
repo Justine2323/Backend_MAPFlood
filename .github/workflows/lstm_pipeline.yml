@@ -33,7 +33,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python main.py
+        run: python LSTM-main.py
 
       - name: Commit Updated Scalers & Keras Models
         uses: stefanzweifel/git-auto-commit-action@v5
