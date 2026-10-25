@@ -1,0 +1,42 @@
+name: Continuous Flood Prediction Engine
+
+on:
+  schedule:
+    # Runs automatically every 15 minutes
+    - cron: '*/15 * * * *'
+  # Allows manual triggering from the GitHub Actions tab anytime
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-lstm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install tensorflow keras supabase pandas scikit-learn joblib
+
+      - name: Execute LSTM Prediction Engine
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python main.py
+
+      - name: Commit Updated Scalers & Keras Models
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "auto: update model weights and scalers [skip ci]"
+          file_pattern: "*.joblib *.keras"
