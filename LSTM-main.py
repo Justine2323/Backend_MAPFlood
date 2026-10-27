@@ -85,6 +85,13 @@ def prep_station_b(df: pd.DataFrame) -> pd.DataFrame:
     return df, BASE_FEATURES + ["float_tier", "sensor_delta"]
 
 def prep_station_c(df: pd.DataFrame) -> pd.DataFrame:
+    # Safely create camera_est_ft from water_tier if it doesn't exist
+    if "camera_est_ft" not in df.columns:
+        if "water_tier" in df.columns:
+            df["camera_est_ft"] = df["water_tier"].astype(float)
+        else:
+            df["camera_est_ft"] = 0.0
+
     df["camera_est_ft"] = df["camera_est_ft"].ffill().fillna(0.0)
     df["actual_water_level_ft"] = df["camera_est_ft"]
     df["sensor_delta"] = df["camera_est_ft"].diff().fillna(0.0)
