@@ -232,7 +232,7 @@ if __name__ == "__main__":
 
         process_station(supabase_client, "Station A", prep_station_a, flood_metrics)
         process_station(supabase_client, "Station B", prep_station_b, flood_metrics)
-        process_station(supabase_client, "Station C", prep_station_c, flood_metrics)
+        process_station(supabase_client, "StationC", prep_station_c, flood_metrics)
         
         print("\n[SUCCESS] Pipeline completed successfully.")
     except Exception as e:
