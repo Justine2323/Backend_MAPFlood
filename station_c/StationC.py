@@ -74,18 +74,20 @@ cached_weather = {
 # 1. OPTICAL & GPIO SENSOR DRIVERS
 # ============================================================================
 def init_camera():
-    """Scans for active USB camera."""
+    """Attempts direct node paths and standard indexes for Logitech C270."""
     global cap, camera_index
-    for idx in [0, 1, 2]:
-        temp_cap = cv2.VideoCapture(idx)
+    targets = ["/dev/video0", "/dev/video1", 0, 1, 2]
+    
+    for dev in targets:
+        temp_cap = cv2.VideoCapture(dev)
         if temp_cap.isOpened():
             ret, _ = temp_cap.read()
             if ret:
-                print(f"[INFO] Connected to USB Camera at index {idx}")
+                print(f"[INFO] Connected to USB Camera at {dev}")
                 cap = temp_cap
-                camera_index = idx
                 return True
             temp_cap.release()
+            
     print("[WARNING] No active USB camera device found.")
     return False
 
