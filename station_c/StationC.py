@@ -90,6 +90,65 @@ class HardwareInterface:
 
     def _init_gpio(self):
         try:
+            # Fixed import: DigitalOutputDevice replaces non-existent Output
+            from gpiozero import DigitalInputDevice, DigitalOutputDevice  # type: ignore
+            self.siren = DigitalOutputDevice(SIREN_PIN)
+            self.siren.off()
+            self.rain_sensor = DigitalInputDevice(RAIN_GPIO_PIN, pull_up=True)
+            self.wind_sensor = DigitalInputDevice(WIND_GPIO_PIN, pull_up=True)
+            self.gpio_available = True
+            print("[INFO] Raspberry Pi 5 GPIO initialized successfully.")
+        except Exception as e:
+            print(f"[WARNING] GPIO Simulation Mode ({e}).")
+
+    def _init_camera(self):
+        # Scan indices 0 through 10 using explicit V4L2 backend for RPi 5
+        for dev in range(10):
+            temp_cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+            if temp_cap.isOpened():
+                ret, frame = temp_cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    print(f"[INFO] Logitech C270 initialized at /dev/video{dev}")
+                    self.cap = temp_cap
+                    return
+                temp_cap.release()
+        print("[ERROR] USB Camera not found. Ensure C270 is connected.")
+
+    def read_rain(self):
+        if self.gpio_available and self.rain_sensor:
+            return 100 if not self.rain_sensor.is_active else 0
+        return 0
+
+    def read_wind(self):
+        if self.gpio_available and self.wind_sensor:
+            pulse_count = 0
+            start_time = time.time()
+            last_state = self.wind_sensor.is_active
+            while time.time() - start_time < 0.2:
+                current_state = self.wind_sensor.is_active
+                if current_state and not last_state:
+                    pulse_count += 1
+                last_state = current_state
+                time.sleep(0.005)
+            return round((pulse_count / 0.2) * 2.4, 2)
+        return 0.0
+
+    def set_siren(self, state: bool):
+        if self.gpio_available and self.siren:
+            self.siren.on() if state else self.siren.off()
+    """Manages GPIO peripherals and the Logitech C270 Web Camera."""
+    
+    def __init__(self):
+        self.gpio_available = False
+        self.siren = None
+        self.rain_sensor = None
+        self.wind_sensor = None
+        self.cap = None
+        self._init_gpio()
+        self._init_camera()
+
+    def _init_gpio(self):
+        try:
             from gpiozero import DigitalInputDevice, Output  # type: ignore
             self.siren = Output(SIREN_PIN)
             self.siren.off()
