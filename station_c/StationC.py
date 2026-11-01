@@ -209,7 +209,10 @@ class TelemetryController:
     def process_frame(self, frame):
         height, width, _ = frame.shape
         cx, cy = width // 2, height // 2
-        box_size = 150
+        
+        # --- CHANGE THIS VALUE TO MAKE THE BOX SMALLER ---
+        box_size = 50  # Changed from 150 to 50
+        # -------------------------------------------------
 
         x1, y1 = max(0, cx - box_size), max(0, cy - box_size)
         x2, y2 = min(width, cx + box_size), min(height, cy + box_size)
@@ -245,7 +248,7 @@ class TelemetryController:
         cv2.putText(frame, f"LSTM Acc: {self.state['lstm_accuracy_pct']:.1f}%", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.putText(frame, f"HSV: {h}, {s}, {v}", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 255), 2)
         return frame
-
+    
     def _hardware_loop(self):
         while True:
             rain_pct = self.hw.read_rain()
