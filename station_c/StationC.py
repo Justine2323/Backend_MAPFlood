@@ -245,7 +245,7 @@ class TelemetryController:
     def process_frame(self, frame):
         height, width, _ = frame.shape
         cx, cy = width // 2, height // 2
-        box_size = 100
+        box_size = 150  # Increased box size for better sampling
 
         x1, y1 = max(0, cx - box_size), max(0, cy - box_size)
         x2, y2 = min(width, cx + box_size), min(height, cy + box_size)
@@ -255,13 +255,14 @@ class TelemetryController:
         mean_hsv = cv2.mean(hsv_roi)
         h, s, v = int(mean_hsv[0]), int(mean_hsv[1]), int(mean_hsv[2])
 
+        # Adjusted Red thresholds slightly; use the new on-screen HSV display to fine-tune
         if s < 40 or v < 40:
             tier = self.state["water_tier"]
             color_name = "Unknown"
             status = "Low Light / Unknown"
-        elif (0 <= h <= 8) or (170 <= h <= 180):
+        elif (0 <= h <= 10) or (160 <= h <= 180):
             color_name, tier, status = "Red", 3, "DANGER (2-3ft)"
-        elif 9 <= h <= 25:
+        elif 11 <= h <= 25:
             color_name, tier, status = "Orange", 2, "WARNING (1-2ft)"
         elif 36 <= h <= 85:
             color_name, tier, status = "Green", 1, "SAFE (0-1ft)"
@@ -282,6 +283,8 @@ class TelemetryController:
         cv2.putText(frame, f"Color: {color_name}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         cv2.putText(frame, f"Status: {status}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         cv2.putText(frame, f"LSTM Acc: {self.state['lstm_accuracy_pct']:.1f}%", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        # Display the live HSV values to help you fix the false-green reading
+        cv2.putText(frame, f"HSV: {h}, {s}, {v}", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 255), 2)
         return frame
 
     def _hardware_loop(self):
@@ -377,8 +380,36 @@ def dashboard():
     """)
 
 @app.route("/video_feed")
-def video_feed():
-    return Response(frame_generator(), mimetype="multipart/x-mixed-replace; boundary=frame")
+def get_local_ip():
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+def find_free_port(start_port):
+    import socket
+    for port in range(start_port, start_port + 10):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("0.0.0.0", port))
+            s.close()
+            return port
+        except OSError:
+            continue
+    return start_port
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, threaded=True)
+    local_ip = get_local_ip()
+    port = find_free_port(5000)
+    
+    print(f"\n{'='*55}")
+    print(f"[SUCCESS] Station C is running!")
+    print(f"[NETWORK] Access the Dashboard at: http://{local_ip}:{port}")
+    print(f"{'='*55}\n")
+    
+    app.run(host="0.0.0.0", port=port, threaded=True)
