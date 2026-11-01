@@ -84,6 +84,24 @@ class HardwareInterface:
             print(f"[WARNING] GPIO Initialization skipped ({e}). Running in simulation mode.")
 
     def _init_camera(self):
+        # Hardcoded to bypass internal Pi 5 nodes (e.g., video0-3)
+        dev = 0 # <--- CHANGE THIS NUMBER to match the output from Step 2
+        
+        temp_cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+        
+        # Explicitly set resolution for the C270 to ensure stable initialization
+        temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        if temp_cap.isOpened():
+            ret, frame = temp_cap.read()
+            if ret and frame is not None and frame.size > 0:
+                print(f"[INFO] Logitech C270 initialized successfully at /dev/video{dev}")
+                self.cap = temp_cap
+                return
+            temp_cap.release()
+
+        print(f"[ERROR] USB Camera not found at /dev/video{dev}. Check connection.")
         # Method 1: Linux V4L device path (bypasses Pi 5 RP1 internal hardware nodes 0-3)
         usb_devices = glob.glob("/dev/v4l/by-id/*")
         for dev in usb_devices:
