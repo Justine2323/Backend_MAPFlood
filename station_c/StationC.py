@@ -39,9 +39,9 @@ class Config:
     MIN_VALUE = 40
     
     # Calibrated to actual hardware HSV readings
-    RED_H_MIN, RED_H_MAX = 1, 25       # Targets H=122
-    ORANGE_H_MIN, ORANGE_H_MAX = 26, 95   # Targets H=33
-    GREEN_H_MIN, GREEN_H_MAX = 96, 120    # Targets H=91
+    RED_H_MIN, RED_H_MAX = 25, 130       # Targets H=122
+    ORANGE_H_MIN, ORANGE_H_MAX = 30, 115   # Targets H=33
+    GREEN_H_MIN, GREEN_H_MAX = 90, 120    # Targets H=91
 
 class StateManager:
     @staticmethod
