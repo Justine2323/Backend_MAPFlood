@@ -32,16 +32,16 @@ class Config:
     SIREN_TRIGGER_WIND_KMH = 35.0
     
     STATE_FILE = "station_c_state.json"
-    CAMERA_INDICES = [1, 0, 2, 4, 6]  # Index 1 prioritized based on successful log
+    CAMERA_INDICES = [1, 0, 2, 4, 6]
     
     # --- EASY COLOR THRESHOLD ADJUSTMENTS ---
     MIN_SATURATION = 40
     MIN_VALUE = 40
     
-    RED_H1_MIN, RED_H1_MAX = 0, 10
-    RED_H2_MIN, RED_H2_MAX = 160, 180
-    ORANGE_H_MIN, ORANGE_H_MAX = 11, 25
-    GREEN_H_MIN, GREEN_H_MAX = 36, 85
+    # Calibrated to actual hardware HSV readings
+    RED_H_MIN, RED_H_MAX = 110, 135       # Targets H=122
+    ORANGE_H_MIN, ORANGE_H_MAX = 20, 45   # Targets H=33
+    GREEN_H_MIN, GREEN_H_MAX = 75, 105    # Targets H=91
 
 class StateManager:
     @staticmethod
@@ -219,10 +219,10 @@ class TelemetryController:
         mean_hsv = cv2.mean(hsv_roi)
         h, s, v = int(mean_hsv[0]), int(mean_hsv[1]), int(mean_hsv[2])
 
-        # Using Config thresholds for color detection
+        # Using hardware-calibrated Config thresholds
         if s < Config.MIN_SATURATION or v < Config.MIN_VALUE:
             tier, color_name, status = self.state["water_tier"], "Unknown", "Low Light / Unknown"
-        elif (Config.RED_H1_MIN <= h <= Config.RED_H1_MAX) or (Config.RED_H2_MIN <= h <= Config.RED_H2_MAX):
+        elif Config.RED_H_MIN <= h <= Config.RED_H_MAX:
             color_name, tier, status = "Red", 3, "DANGER (2-3ft)"
         elif Config.ORANGE_H_MIN <= h <= Config.ORANGE_H_MAX:
             color_name, tier, status = "Orange", 2, "WARNING (1-2ft)"
@@ -372,7 +372,6 @@ if __name__ == "__main__":
         print(f"[NETWORK] Network address hidden until camera is resolved.")
     print(f"{'='*55}\n")
     
-    # Run server completely silently except for critical errors
     import logging
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
