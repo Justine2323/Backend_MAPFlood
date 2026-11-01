@@ -1,8 +1,3 @@
-"""
-================================================================================
-Station C - Integrated Real-Time Optical Telemetry, GPIO & LSTM (Pi 5)
-================================================================================
-"""
 import glob
 import json
 import os
@@ -10,6 +5,7 @@ import ssl
 import threading
 import time
 import urllib.request
+import socket
 import numpy as np
 import cv2  # type: ignore
 from collections import deque
@@ -20,27 +16,25 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 from tensorflow.keras.models import Sequential  # type: ignore
 from tensorflow.keras.layers import LSTM, Dense, Input  # type: ignore
 
-SUPABASE_URL = "https://jqhimswayyurxymltrxn.supabase.co"
-SUPABASE_KEY = "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
-
-TANONG_LAT = 14.6577
-TANONG_LON = 120.9537
-
-SIREN_PIN = 17
-RAIN_GPIO_PIN = 27
-WIND_GPIO_PIN = 22
-
-SIREN_TRIGGER_RAIN_PERCENT = 50
-SIREN_TRIGGER_WIND_KMH = 35.0
-
-STATE_FILE = "station_c_state.json"
+class Config:
+    SUPABASE_URL = "https://jqhimswayyurxymltrxn.supabase.co"
+    SUPABASE_KEY = "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
+    TANONG_LAT = 14.6577
+    TANONG_LON = 120.9537
+    SIREN_PIN = 17
+    RAIN_GPIO_PIN = 27
+    WIND_GPIO_PIN = 22
+    SIREN_TRIGGER_RAIN_PERCENT = 50
+    SIREN_TRIGGER_WIND_KMH = 35.0
+    STATE_FILE = "station_c_state.json"
+    CAMERA_INDICES = [0, 2, 4, 1]  # Prioritized list of common camera indices
 
 class StateManager:
     @staticmethod
     def load_state():
-        if os.path.exists(STATE_FILE):
+        if os.path.exists(Config.STATE_FILE):
             try:
-                with open(STATE_FILE, 'r') as f:
+                with open(Config.STATE_FILE, 'r') as f:
                     return json.load(f)
             except Exception as e:
                 print(f"[WARNING] Failed to load state: {e}")
@@ -56,7 +50,7 @@ class StateManager:
     @staticmethod
     def save_state(state_dict):
         try:
-            with open(STATE_FILE, 'w') as f:
+            with open(Config.STATE_FILE, 'w') as f:
                 json.dump(state_dict, f)
         except Exception as e:
             print(f"[WARNING] Failed to save state: {e}")
@@ -74,57 +68,31 @@ class HardwareInterface:
     def _init_gpio(self):
         try:
             from gpiozero import DigitalInputDevice, DigitalOutputDevice  # type: ignore
-            self.siren = DigitalOutputDevice(SIREN_PIN)
+            self.siren = DigitalOutputDevice(Config.SIREN_PIN)
             self.siren.off()
-            self.rain_sensor = DigitalInputDevice(RAIN_GPIO_PIN, pull_up=True)
-            self.wind_sensor = DigitalInputDevice(WIND_GPIO_PIN, pull_up=True)
+            self.rain_sensor = DigitalInputDevice(Config.RAIN_GPIO_PIN, pull_up=True)
+            self.wind_sensor = DigitalInputDevice(Config.WIND_GPIO_PIN, pull_up=True)
             self.gpio_available = True
             print("[INFO] Raspberry Pi 5 GPIO initialized successfully.")
         except Exception as e:
             print(f"[WARNING] GPIO Initialization skipped ({e}). Running in simulation mode.")
 
     def _init_camera(self):
-        # Hardcoded to bypass internal Pi 5 nodes (e.g., video0-3)
-        dev = 0 # <--- CHANGE THIS NUMBER to match the output from Step 2
-        
-        temp_cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
-        
-        # Explicitly set resolution for the C270 to ensure stable initialization
-        temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
-        if temp_cap.isOpened():
-            ret, frame = temp_cap.read()
-            if ret and frame is not None and frame.size > 0:
-                print(f"[INFO] Logitech C270 initialized successfully at /dev/video{dev}")
-                self.cap = temp_cap
-                return
-            temp_cap.release()
-
-        print(f"[ERROR] USB Camera not found at /dev/video{dev}. Check connection.")
-        # Method 1: Linux V4L device path (bypasses Pi 5 RP1 internal hardware nodes 0-3)
-        usb_devices = glob.glob("/dev/v4l/by-id/*")
-        for dev in usb_devices:
-            temp_cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+        # Simplified and robust camera initialization without forcing CAP_V4L2
+        for idx in Config.CAMERA_INDICES:
+            temp_cap = cv2.VideoCapture(idx)
+            
             if temp_cap.isOpened():
+                temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                
                 ret, frame = temp_cap.read()
                 if ret and frame is not None and frame.size > 0:
-                    print(f"[INFO] Logitech C270 initialized successfully via {dev}")
+                    print(f"[SUCCESS] Logitech C270 initialized successfully at index {idx}")
                     self.cap = temp_cap
                     return
                 temp_cap.release()
-
-        # Method 2: Scan index offset (4 to 12) for Pi 5 USB camera assignment
-        for idx in range(4, 12):
-            temp_cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-            if temp_cap.isOpened():
-                ret, frame = temp_cap.read()
-                if ret and frame is not None and frame.size > 0:
-                    print(f"[INFO] Logitech C270 initialized successfully at /dev/video{idx}")
-                    self.cap = temp_cap
-                    return
-                temp_cap.release()
-
+                
         print("[ERROR] USB Camera not found. Ensure C270 is connected to USB.")
 
     def read_rain(self):
@@ -162,7 +130,7 @@ class EnvironmentAPI:
 
     def _fetch_loop(self):
         url = (
-            f"https://api.open-meteo.com/v1/forecast?latitude={TANONG_LAT}&longitude={TANONG_LON}"
+            f"https://api.open-meteo.com/v1/forecast?latitude={Config.TANONG_LAT}&longitude={Config.TANONG_LON}"
             "&current=temperature_2m,relative_humidity_2m,precipitation,weather_code"
         )
         ctx = ssl.create_default_context()
@@ -232,8 +200,7 @@ class TelemetryController:
         self.hw = HardwareInterface()
         self.env = EnvironmentAPI()
         self.lstm = LSTMPredictor()
-        
-        self.supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        self.supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
         self.state = StateManager.load_state()
         self.offline_queue = deque(maxlen=50)
         self.telemetry_lock = threading.Lock()
@@ -245,7 +212,7 @@ class TelemetryController:
     def process_frame(self, frame):
         height, width, _ = frame.shape
         cx, cy = width // 2, height // 2
-        box_size = 150  # Increased box size for better sampling
+        box_size = 150
 
         x1, y1 = max(0, cx - box_size), max(0, cy - box_size)
         x2, y2 = min(width, cx + box_size), min(height, cy + box_size)
@@ -255,7 +222,6 @@ class TelemetryController:
         mean_hsv = cv2.mean(hsv_roi)
         h, s, v = int(mean_hsv[0]), int(mean_hsv[1]), int(mean_hsv[2])
 
-        # Adjusted Red thresholds slightly; use the new on-screen HSV display to fine-tune
         if s < 40 or v < 40:
             tier = self.state["water_tier"]
             color_name = "Unknown"
@@ -283,7 +249,6 @@ class TelemetryController:
         cv2.putText(frame, f"Color: {color_name}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         cv2.putText(frame, f"Status: {status}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         cv2.putText(frame, f"LSTM Acc: {self.state['lstm_accuracy_pct']:.1f}%", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        # Display the live HSV values to help you fix the false-green reading
         cv2.putText(frame, f"HSV: {h}, {s}, {v}", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 255), 2)
         return frame
 
@@ -295,7 +260,7 @@ class TelemetryController:
             with self.telemetry_lock:
                 tier = self.state["water_tier"]
                 
-            trigger_siren = (tier >= 3) or (rain_pct >= SIREN_TRIGGER_RAIN_PERCENT) or (wind_kmh >= SIREN_TRIGGER_WIND_KMH)
+            trigger_siren = (tier >= 3) or (rain_pct >= Config.SIREN_TRIGGER_RAIN_PERCENT) or (wind_kmh >= Config.SIREN_TRIGGER_WIND_KMH)
             self.hw.set_siren(trigger_siren)
             
             env = self.env.weather_data
@@ -380,8 +345,10 @@ def dashboard():
     """)
 
 @app.route("/video_feed")
+def video_feed():
+    return Response(frame_generator(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
 def get_local_ip():
-    import socket
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -392,7 +359,6 @@ def get_local_ip():
         return "127.0.0.1"
 
 def find_free_port(start_port):
-    import socket
     for port in range(start_port, start_port + 10):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
