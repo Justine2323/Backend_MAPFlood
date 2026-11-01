@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.request
 import numpy as np
+import glob 
 import cv2  # type: ignore
 from collections import deque
 from flask import Flask, Response, render_template_string  # type: ignore
@@ -90,6 +91,77 @@ class HardwareInterface:
 
     def _init_gpio(self):
         try:
+            # Fix: Use DigitalOutputDevice instead of non-existent Output
+            from gpiozero import DigitalInputDevice, DigitalOutputDevice  # type: ignore
+            self.siren = DigitalOutputDevice(SIREN_PIN)
+            self.siren.off()
+            self.rain_sensor = DigitalInputDevice(RAIN_GPIO_PIN, pull_up=True)
+            self.wind_sensor = DigitalInputDevice(WIND_GPIO_PIN, pull_up=True)
+            self.gpio_available = True
+            print("[INFO] Raspberry Pi 5 GPIO initialized successfully.")
+        except Exception as e:
+            print(f"[WARNING] GPIO Initialization skipped ({e}). Running in simulation mode.")
+
+    def _init_camera(self):
+        # 1. Direct probe via Linux USB device path (skips Pi 5 internal RP1 camera nodes)
+        usb_cameras = glob.glob("/dev/v4l/by-id/*")
+        for dev_path in usb_cameras:
+            temp_cap = cv2.VideoCapture(dev_path, cv2.CAP_V4L2)
+            if temp_cap.isOpened():
+                ret, frame = temp_cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    print(f"[INFO] Logitech C270 connected at {dev_path}")
+                    self.cap = temp_cap
+                    return
+                temp_cap.release()
+
+        # 2. Fallback probe across higher video device indices (video4 to video12)
+        for dev in range(4, 12):
+            temp_cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+            if temp_cap.isOpened():
+                ret, frame = temp_cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    print(f"[INFO] Logitech C270 initialized at /dev/video{dev}")
+                    self.cap = temp_cap
+                    return
+                temp_cap.release()
+
+        print("[ERROR] USB Camera not found. Ensure C270 is securely plugged into USB.")
+
+    def read_rain(self):
+        if self.gpio_available and self.rain_sensor:
+            return 100 if not self.rain_sensor.is_active else 0
+        return 0
+
+    def read_wind(self):
+        if self.gpio_available and self.wind_sensor:
+            pulse_count = 0
+            start_time = time.time()
+            last_state = self.wind_sensor.is_active
+            while time.time() - start_time < 0.2:
+                current_state = self.wind_sensor.is_active
+                if current_state and not last_state:
+                    pulse_count += 1
+                last_state = current_state
+                time.sleep(0.005)
+            return round((pulse_count / 0.2) * 2.4, 2)
+        return 0.0
+
+    def set_siren(self, state: bool):
+        if self.gpio_available and self.siren:
+            self.siren.on() if state else self.siren.off()
+    
+    def __init__(self):
+        self.gpio_available = False
+        self.siren = None
+        self.rain_sensor = None
+        self.wind_sensor = None
+        self.cap = None
+        self._init_gpio()
+        self._init_camera()
+
+    def _init_gpio(self):
+        try:
             # Fixed import: DigitalOutputDevice replaces non-existent Output
             from gpiozero import DigitalInputDevice, DigitalOutputDevice  # type: ignore
             self.siren = DigitalOutputDevice(SIREN_PIN)
@@ -134,68 +206,9 @@ class HardwareInterface:
         return 0.0
 
     def set_siren(self, state: bool):
-        if self.gpio_available and self.siren:
+        if self.gpio_available and self.siren:            
             self.siren.on() if state else self.siren.off()
-    """Manages GPIO peripherals and the Logitech C270 Web Camera."""
-    
-    def __init__(self):
-        self.gpio_available = False
-        self.siren = None
-        self.rain_sensor = None
-        self.wind_sensor = None
-        self.cap = None
-        self._init_gpio()
-        self._init_camera()
-
-    def _init_gpio(self):
-        try:
-            from gpiozero import DigitalInputDevice, Output  # type: ignore
-            self.siren = Output(SIREN_PIN)
-            self.siren.off()
-            self.rain_sensor = DigitalInputDevice(RAIN_GPIO_PIN, pull_up=True)
-            self.wind_sensor = DigitalInputDevice(WIND_GPIO_PIN, pull_up=True)
-            self.gpio_available = True
-            print("[INFO] Raspberry Pi 5 GPIO initialized.")
-        except Exception as e:
-            print(f"[WARNING] GPIO Simulation Mode ({e}).")
-
-    def _init_camera(self):
-        targets = ["/dev/video0", "/dev/video1", 0, 1, 2]
-        for dev in targets:
-            temp_cap = cv2.VideoCapture(dev)
-            if temp_cap.isOpened():
-                ret, _ = temp_cap.read()
-                if ret:
-                    print(f"[INFO] Logitech C270 initialized at {dev}")
-                    self.cap = temp_cap
-                    return
-                temp_cap.release()
-        print("[ERROR] USB Camera not found. Ensure C270 is connected.")
-
-    def read_rain(self):
-        if self.gpio_available and self.rain_sensor:
-            return 100 if not self.rain_sensor.is_active else 0
-        return 0
-
-    def read_wind(self):
-        if self.gpio_available and self.wind_sensor:
-            pulse_count = 0
-            start_time = time.time()
-            last_state = self.wind_sensor.is_active
-            while time.time() - start_time < 0.2:
-                current_state = self.wind_sensor.is_active
-                if current_state and not last_state:
-                    pulse_count += 1
-                last_state = current_state
-                time.sleep(0.005)
-            return round((pulse_count / 0.2) * 2.4, 2)
-        return 0.0
-
-    def set_siren(self, state: bool):
-        if self.gpio_available and self.siren:
-            self.siren.on() if state else self.siren.off()
-
-
+            
 # ============================================================================
 # MODULE 3: ENVIRONMENTAL API MANAGER
 # ============================================================================
