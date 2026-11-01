@@ -12,7 +12,10 @@ from collections import deque
 from flask import Flask, Response, render_template_string  # type: ignore
 from supabase import Client, create_client  # type: ignore
 
+# Suppress verbose TensorFlow and OpenCV warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['OPENCV_LOG_LEVEL'] = 'FATAL' 
+
 from tensorflow.keras.models import Sequential  # type: ignore
 from tensorflow.keras.layers import LSTM, Dense, Input  # type: ignore
 
@@ -21,13 +24,24 @@ class Config:
     SUPABASE_KEY = "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
     TANONG_LAT = 14.6577
     TANONG_LON = 120.9537
+    
     SIREN_PIN = 17
     RAIN_GPIO_PIN = 27
     WIND_GPIO_PIN = 22
     SIREN_TRIGGER_RAIN_PERCENT = 50
     SIREN_TRIGGER_WIND_KMH = 35.0
+    
     STATE_FILE = "station_c_state.json"
-    CAMERA_INDICES = [0, 2, 4, 1]  # Prioritized list of common camera indices
+    CAMERA_INDICES = [1, 0, 2, 4, 6]  # Index 1 prioritized based on successful log
+    
+    # --- EASY COLOR THRESHOLD ADJUSTMENTS ---
+    MIN_SATURATION = 40
+    MIN_VALUE = 40
+    
+    RED_H1_MIN, RED_H1_MAX = 0, 10
+    RED_H2_MIN, RED_H2_MAX = 160, 180
+    ORANGE_H_MIN, ORANGE_H_MAX = 11, 25
+    GREEN_H_MIN, GREEN_H_MAX = 36, 85
 
 class StateManager:
     @staticmethod
@@ -37,7 +51,7 @@ class StateManager:
                 with open(Config.STATE_FILE, 'r') as f:
                     return json.load(f)
             except Exception as e:
-                print(f"[WARNING] Failed to load state: {e}")
+                pass
         return {
             "color": "Unknown",
             "water_tier": 0,
@@ -52,8 +66,8 @@ class StateManager:
         try:
             with open(Config.STATE_FILE, 'w') as f:
                 json.dump(state_dict, f)
-        except Exception as e:
-            print(f"[WARNING] Failed to save state: {e}")
+        except Exception:
+            pass
 
 class HardwareInterface:
     def __init__(self):
@@ -74,25 +88,21 @@ class HardwareInterface:
             self.wind_sensor = DigitalInputDevice(Config.WIND_GPIO_PIN, pull_up=True)
             self.gpio_available = True
             print("[INFO] Raspberry Pi 5 GPIO initialized successfully.")
-        except Exception as e:
-            print(f"[WARNING] GPIO Initialization skipped ({e}). Running in simulation mode.")
+        except Exception:
+            print(f"[WARNING] GPIO Initialization skipped. Running in simulation mode.")
 
     def _init_camera(self):
-        # Simplified and robust camera initialization without forcing CAP_V4L2
         for idx in Config.CAMERA_INDICES:
             temp_cap = cv2.VideoCapture(idx)
-            
             if temp_cap.isOpened():
                 temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                
                 ret, frame = temp_cap.read()
                 if ret and frame is not None and frame.size > 0:
                     print(f"[SUCCESS] Logitech C270 initialized successfully at index {idx}")
                     self.cap = temp_cap
                     return
                 temp_cap.release()
-                
         print("[ERROR] USB Camera not found. Ensure C270 is connected to USB.")
 
     def read_rain(self):
@@ -121,18 +131,13 @@ class HardwareInterface:
 class EnvironmentAPI:
     def __init__(self):
         self.weather_data = {
-            "om_temp": 30.0,
-            "om_humidity": 70,
-            "rain_percent_api": 0.0,
-            "om_weather_code": 0
+            "om_temp": 30.0, "om_humidity": 70, "rain_percent_api": 0.0, "om_weather_code": 0
         }
         threading.Thread(target=self._fetch_loop, daemon=True).start()
 
     def _fetch_loop(self):
-        url = (
-            f"https://api.open-meteo.com/v1/forecast?latitude={Config.TANONG_LAT}&longitude={Config.TANONG_LON}"
-            "&current=temperature_2m,relative_humidity_2m,precipitation,weather_code"
-        )
+        url = (f"https://api.open-meteo.com/v1/forecast?latitude={Config.TANONG_LAT}&longitude={Config.TANONG_LON}"
+               "&current=temperature_2m,relative_humidity_2m,precipitation,weather_code")
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -147,8 +152,8 @@ class EnvironmentAPI:
                     self.weather_data["om_humidity"] = current.get("relative_humidity_2m", 70)
                     self.weather_data["rain_percent_api"] = current.get("precipitation", 0.0) * 10.0
                     self.weather_data["om_weather_code"] = current.get("weather_code", 0)
-            except Exception as e:
-                print(f"[API ERROR] Open-Meteo fetch failed: {e}")
+            except Exception:
+                pass
             time.sleep(600)
 
 class LSTMPredictor:
@@ -175,23 +180,15 @@ class LSTMPredictor:
     def train_and_predict(self):
         if len(self.history) < self.sequence_length + 5:
             return 0
-
         data = np.array(self.history)
         X, y = [], []
         for i in range(len(data) - self.sequence_length - 1):
             X.append(data[i : i + self.sequence_length])
             y.append(data[i + self.sequence_length][0])
-
-        X = np.array(X)
-        y = np.array(y)
-
-        hist = self.model.fit(X, y, epochs=3, batch_size=4, verbose=0)
+        hist = self.model.fit(np.array(X), np.array(y), epochs=3, batch_size=4, verbose=0)
         loss = hist.history['loss'][-1]
-        simulated_gain = max(0.5, (1.0 - loss) * 2)
-        self.current_accuracy = min(92.4, self.current_accuracy + simulated_gain)
-
-        recent_seq = data[-self.sequence_length:]
-        recent_seq = np.expand_dims(recent_seq, axis=0)
+        self.current_accuracy = min(92.4, self.current_accuracy + max(0.5, (1.0 - loss) * 2))
+        recent_seq = np.expand_dims(data[-self.sequence_length:], axis=0)
         raw_pred = self.model.predict(recent_seq, verbose=0)[0][0]
         return int(round(max(0, min(3, raw_pred))))
 
@@ -216,26 +213,23 @@ class TelemetryController:
 
         x1, y1 = max(0, cx - box_size), max(0, cy - box_size)
         x2, y2 = min(width, cx + box_size), min(height, cy + box_size)
-
         roi = frame[y1:y2, x1:x2]
+        
         hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mean_hsv = cv2.mean(hsv_roi)
         h, s, v = int(mean_hsv[0]), int(mean_hsv[1]), int(mean_hsv[2])
 
-        if s < 40 or v < 40:
-            tier = self.state["water_tier"]
-            color_name = "Unknown"
-            status = "Low Light / Unknown"
-        elif (0 <= h <= 10) or (160 <= h <= 180):
+        # Using Config thresholds for color detection
+        if s < Config.MIN_SATURATION or v < Config.MIN_VALUE:
+            tier, color_name, status = self.state["water_tier"], "Unknown", "Low Light / Unknown"
+        elif (Config.RED_H1_MIN <= h <= Config.RED_H1_MAX) or (Config.RED_H2_MIN <= h <= Config.RED_H2_MAX):
             color_name, tier, status = "Red", 3, "DANGER (2-3ft)"
-        elif 11 <= h <= 25:
+        elif Config.ORANGE_H_MIN <= h <= Config.ORANGE_H_MAX:
             color_name, tier, status = "Orange", 2, "WARNING (1-2ft)"
-        elif 36 <= h <= 85:
+        elif Config.GREEN_H_MIN <= h <= Config.GREEN_H_MAX:
             color_name, tier, status = "Green", 1, "SAFE (0-1ft)"
         else:
-            color_name = "Unknown"
-            tier = self.state["water_tier"]
-            status = "Unknown"
+            tier, color_name, status = self.state["water_tier"], "Unknown", "Unknown"
 
         with self.telemetry_lock:
             self.state["color"] = color_name
@@ -256,13 +250,10 @@ class TelemetryController:
         while True:
             rain_pct = self.hw.read_rain()
             wind_kmh = self.hw.read_wind()
-            
             with self.telemetry_lock:
                 tier = self.state["water_tier"]
-                
             trigger_siren = (tier >= 3) or (rain_pct >= Config.SIREN_TRIGGER_RAIN_PERCENT) or (wind_kmh >= Config.SIREN_TRIGGER_WIND_KMH)
             self.hw.set_siren(trigger_siren)
-            
             env = self.env.weather_data
             self.lstm.record_step(tier, rain_pct, env["om_temp"], env["rain_percent_api"])
             time.sleep(1.0)
@@ -295,7 +286,6 @@ class TelemetryController:
                     data_to_send = list(self.offline_queue)
                     self.supabase.table("StationC").insert(data_to_send).execute()
                     self.offline_queue.clear()
-                    print(f"[CLOUD] Synced {len(data_to_send)} records. Current Tier: {payload['water_tier']}")
                 except Exception:
                     pass
 
@@ -374,8 +364,17 @@ if __name__ == "__main__":
     port = find_free_port(5000)
     
     print(f"\n{'='*55}")
-    print(f"[SUCCESS] Station C is running!")
-    print(f"[NETWORK] Access the Dashboard at: http://{local_ip}:{port}")
+    if controller.hw.cap is not None and controller.hw.cap.isOpened():
+        print(f"[SUCCESS] Station C is running!")
+        print(f"[NETWORK] Access the Dashboard at: http://{local_ip}:{port}")
+    else:
+        print(f"[WARNING] Flask server started, but NO CAMERA DETECTED.")
+        print(f"[NETWORK] Network address hidden until camera is resolved.")
     print(f"{'='*55}\n")
+    
+    # Run server completely silently except for critical errors
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
     
     app.run(host="0.0.0.0", port=port, threaded=True)
