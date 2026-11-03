@@ -32,7 +32,7 @@ class Config:
     SIREN_TRIGGER_WIND_KMH = 35.0
     
     STATE_FILE = "station_c_state.json"
-    CAMERA_INDICES = [1, 0, 2, 4, 6]
+    CAMERA_INDICES = list(range(40))
     
     # --- EASY COLOR THRESHOLD ADJUSTMENTS ---
     MIN_SATURATION = 40
