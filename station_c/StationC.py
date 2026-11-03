@@ -289,7 +289,9 @@ class TelemetryController:
                     data_to_send = list(self.offline_queue)
                     self.supabase.table("StationC").insert(data_to_send).execute()
                     self.offline_queue.clear()
-                except Exception:
+                    print(f"[SUPABASE] Successfully sent {len(data_to_send)} records.")
+                except Exception as e:
+                    print(f"[SUPABASE ERROR] {e}")
                     pass
 
 app = Flask(__name__)
