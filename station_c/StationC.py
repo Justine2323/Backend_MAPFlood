@@ -32,7 +32,7 @@ class Config:
     SIREN_TRIGGER_WIND_KMH = 35.0
     
     STATE_FILE = "station_c_state.json"
-    CAMERA_INDICES = list(range(40))
+    CAMERA_INDICES = [0, 1]
     
     # --- EASY COLOR THRESHOLD ADJUSTMENTS ---
     MIN_SATURATION = 40
@@ -93,13 +93,20 @@ class HardwareInterface:
 
     def _init_camera(self):
         for idx in Config.CAMERA_INDICES:
-            temp_cap = cv2.VideoCapture(idx)
+            # Explicitly force the V4L2 backend (cv2.CAP_V4L2)
+            temp_cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
             if temp_cap.isOpened():
+                # Set format to MJPG to avoid buffer lockup on Raspberry Pi 5
+                temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                ret, frame = temp_cap.read()
+                
+                # Flush initial buffer
+                for _ in range(3):
+                    ret, frame = temp_cap.read()
+                
                 if ret and frame is not None and frame.size > 0:
-                    print(f"[SUCCESS] Logitech C270 initialized successfully at index {idx}")
+                    print(f"[SUCCESS] Logitech C270 initialized successfully at index {idx} (V4L2)")
                     self.cap = temp_cap
                     return
                 temp_cap.release()
