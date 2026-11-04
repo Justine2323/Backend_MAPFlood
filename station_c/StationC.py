@@ -30,6 +30,11 @@ class Config:
     WIND_GPIO_PIN = 22
     SIREN_TRIGGER_RAIN_PERCENT = 50
     SIREN_TRIGGER_WIND_KMH = 35.0
+
+    # --- LED STRIP PINS ---
+    LED_GREEN_PIN = 23
+    LED_ORANGE_PIN = 24
+    LED_RED_PIN = 25
     
     STATE_FILE = "station_c_state.json"
     CAMERA_INDICES = [0, 1]
@@ -76,20 +81,44 @@ class HardwareInterface:
         self.rain_sensor = None
         self.wind_sensor = None
         self.cap = None
+        self.led_green = None
+        self.led_orange = None
+        self.led_red = None
         self._init_gpio()
         self._init_camera()
 
     def _init_gpio(self):
         try:
-            from gpiozero import DigitalInputDevice, DigitalOutputDevice  # type: ignore
+            from gpiozero import DigitalInputDevice, DigitalOutputDevice, LED  # type: ignore
             self.siren = DigitalOutputDevice(Config.SIREN_PIN)
             self.siren.off()
             self.rain_sensor = DigitalInputDevice(Config.RAIN_GPIO_PIN, pull_up=True)
             self.wind_sensor = DigitalInputDevice(Config.WIND_GPIO_PIN, pull_up=True)
+            self.led_green = LED(Config.LED_GREEN_PIN)
+            self.led_orange = LED(Config.LED_ORANGE_PIN)
+            self.led_red = LED(Config.LED_RED_PIN)
             self.gpio_available = True
             print("[INFO] Raspberry Pi 5 GPIO initialized successfully.")
         except Exception:
             print(f"[WARNING] GPIO Initialization skipped. Running in simulation mode.")
+
+    def set_led_strip(self, tier: int):
+        """Changes the LED strip color based on the current water tier."""
+        if not self.gpio_available:
+            return
+
+        # Turn all off to reset
+        self.led_green.off()
+        self.led_orange.off()
+        self.led_red.off()
+
+        # Activate the correct LED based on the HSV tier
+        if tier == 1:
+            self.led_green.on()
+        elif tier == 2:
+            self.led_orange.on()
+        elif tier >= 3:
+            self.led_red.on()
 
     def _init_camera(self):
         for idx in Config.CAMERA_INDICES:
@@ -264,6 +293,7 @@ class TelemetryController:
                 tier = self.state["water_tier"]
             trigger_siren = (tier >= 3) or (rain_pct >= Config.SIREN_TRIGGER_RAIN_PERCENT) or (wind_kmh >= Config.SIREN_TRIGGER_WIND_KMH)
             self.hw.set_siren(trigger_siren)
+            self.hw.set_led_strip(tier)
             env = self.env.weather_data
             self.lstm.record_step(tier, rain_pct, env["om_temp"], env["rain_percent_api"])
             time.sleep(1.0)
