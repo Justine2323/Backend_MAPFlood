@@ -1,0 +1,30 @@
+name: Continuous LSTM Flood Prediction Pipeline
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Runs automatically every 5 minutes
+  workflow_dispatch:        # Allows manual trigger from GitHub UI
+
+jobs:
+  train-and-predict:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pandas requests scikit-learn tensorflow supabase
+
+      - name: Execute LSTM Engine
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python LSTMStationB.py
