@@ -1,4 +1,4 @@
-name: Continuous LSTM Flood Prediction Pipeline
+name: Continuous LSTM Station B Flood Prediction Pipeline
 
 on:
   schedule:
