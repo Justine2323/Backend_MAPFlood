@@ -370,7 +370,7 @@ class TelemetryController:
             if len(self.offline_queue) > 0:
                 try:
                     data_to_send = list(self.offline_queue)
-                    self.supabase.table("StationC").insert(data_to_send).execute()
+                    self.supabase.table("Station C").insert(data_to_send).execute()
                     self.offline_queue.clear()
                     print(f"[CLOUD] Successfully synced {len(data_to_send)} record(s) to Supabase.")
                 except Exception as e:
