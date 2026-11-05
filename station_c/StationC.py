@@ -45,7 +45,7 @@ class Config:
     # --- ROI (REGION OF INTEREST) BOX CONTROL ---
     # =========================================================================
     # Position offset relative to frame center (0,0 = exact middle of screen)
-    ROI_OFFSET_X = 28       # Positive = shift right, Negative = shift left
+    ROI_OFFSET_X = 27       # Positive = shift right, Negative = shift left
     ROI_OFFSET_Y = -55      # Positive = shift down toward bottom curve of pipe
     
     # Independent box dimensions (pixels)
@@ -55,8 +55,8 @@ class Config:
     # =========================================================================
     # --- OPENCV COLOR THRESHOLDS (Scale: H 0-180, S 0-255, V 0-255) ---
     # =========================================================================
-    MIN_SATURATION = 40
-    MIN_VALUE = 40
+    MIN_SATURATION = 20
+    MIN_VALUE = 20
     
     # Recalibrated to standard OpenCV 0-180 Hue bands:
     RED_H_MIN, RED_H_MAX = 0, 10         # Pure Red band (also wraps at 170-180)
@@ -247,9 +247,6 @@ class TelemetryController:
         self.offline_queue = deque(maxlen=50)
         self.telemetry_lock = threading.Lock()
 
-        # ROLLING BUFFER: Stores last 5 frame color detections to filter out noise
-        self.color_history = deque(maxlen=5)
-
         threading.Thread(target=self._hardware_loop, daemon=True).start()
         threading.Thread(target=self._lstm_loop, daemon=True).start()
         threading.Thread(target=self._cloud_sync_loop, daemon=True).start()
@@ -257,68 +254,48 @@ class TelemetryController:
     def process_frame(self, frame):
         height, width, _ = frame.shape
         
+        # Calculate dynamic box center with offsets
         cx = (width // 2) + Config.ROI_OFFSET_X
         cy = (height // 2) + Config.ROI_OFFSET_Y
         
         half_w = Config.ROI_WIDTH // 2
         half_h = Config.ROI_HEIGHT // 2
 
+        # Boundary checks
         x1 = max(0, cx - half_w)
         y1 = max(0, cy - half_h)
         x2 = min(width, cx + half_w)
         y2 = min(height, cy + half_h)
         
         roi = frame[y1:y2, x1:x2]
+        
         hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mean_hsv = cv2.mean(hsv_roi)
         h, s, v = int(mean_hsv[0]), int(mean_hsv[1]), int(mean_hsv[2])
 
-        # Evaluate raw frame color
+        # Color classification logic using updated OpenCV 0-180 scale
         if s < Config.MIN_SATURATION or v < Config.MIN_VALUE:
-            raw_color = "Unknown"
+            tier, color_name, status = self.state["water_tier"], "Unknown", "Low Light / Unknown"
         elif (Config.RED_H_MIN <= h <= Config.RED_H_MAX) or (h >= 170):
-            raw_color = "Red"
+            color_name, tier, status = "Red", 3, "DANGER (2-3ft)"
         elif Config.ORANGE_H_MIN <= h <= Config.ORANGE_H_MAX:
-            raw_color = "Orange"
+            color_name, tier, status = "Orange", 2, "WARNING (1-2ft)"
         elif Config.GREEN_H_MIN <= h <= Config.GREEN_H_MAX:
-            raw_color = "Green"
+            color_name, tier, status = "Green", 1, "SAFE (0-1ft)"
         else:
-            raw_color = "Unknown"
-
-        # Push raw reading to rolling buffer
-        self.color_history.append(raw_color)
-
-        # MAJORITY VOTE: Determine dominant color across the last 5 frames
-        valid_colors = [c for c in self.color_history if c != "Unknown"]
-        
-        if valid_colors:
-            # Pick the most frequent valid color detected in recent frames
-            smoothed_color = Counter(valid_colors).most_common(1)[0][0]
-        else:
-            # Fallback to current state color if all recent frames were noise
-            smoothed_color = self.state.get("color", "Unknown")
-
-        # Map smoothed color to water tier and status string
-        if smoothed_color == "Red":
-            tier, status = 3, "DANGER (2-3ft)"
-        elif smoothed_color == "Orange":
-            tier, status = 2, "WARNING (1-2ft)"
-        elif smoothed_color == "Green":
-            tier, status = 1, "SAFE (0-1ft)"
-        else:
-            tier, status = 0, "Idle"
+            tier, color_name, status = self.state["water_tier"], "Unknown", "Unknown"
 
         with self.telemetry_lock:
-            self.state["color"] = smoothed_color
+            self.state["color"] = color_name
             self.state["water_tier"] = tier
             self.state["status"] = status
             if tier > 0:
                 self.state["actual_water_level_ft"] = float(tier)
             StateManager.save_state(self.state)
 
-        # Draw overlay
+        # Draw box and status overlay
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
-        cv2.putText(frame, f"Color: {smoothed_color}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        cv2.putText(frame, f"Color: {color_name}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         cv2.putText(frame, f"Status: {status}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         cv2.putText(frame, f"LSTM Acc: {self.state['lstm_accuracy_pct']:.1f}%", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.putText(frame, f"HSV: {h}, {s}, {v}", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 255), 2)
@@ -350,54 +327,23 @@ class TelemetryController:
         while True:
             time.sleep(3)
             with self.telemetry_lock:
-                # 1. Determine distance_data based on detected color / tier
-                tier = self.state["water_tier"]
-                if tier == 1:
-                    dist_data = "0-1ft (Safe)"
-                elif tier == 2:
-                    dist_data = "1-2ft (Warning)"
-                elif tier == 3:
-                    dist_data = "2-3ft (Danger)"
-                else:
-                    dist_data = "Unknown"
-
-                # 2. Determine prediction risk and label from LSTM output
-                pred_rise = self.state["predicted_rise_ft"]
-                if pred_rise <= 1.0:
-                    pred_risk = 1
-                    pred_label = "Low Risk"
-                elif 1.0 < pred_rise <= 2.0:
-                    pred_risk = 2
-                    pred_label = "Moderate Risk"
-                else:
-                    pred_risk = 3
-                    pred_label = "High Risk"
-
-                # 3. Build the payload matching the Supabase schema perfectly
                 payload = {
                     "detected_color": self.state["color"],
-                    "water_tier": tier,
-                    "distance_data": dist_data,
+                    "water_tier": self.state["water_tier"],
                     "status": self.state["status"],
-                    "predicted_flood_risk": pred_risk,
-                    "prediction_label": pred_label,
-                    "predicted_rise_ft": float(pred_rise),
-                    "prediction_accuracy_pct": float(self.state["lstm_accuracy_pct"]) # Renamed to match your DB column
-                    # Removed om_temp and timestamp if they aren't explicitly in your Supabase schema, 
-                    # or you can keep them if your table has them (created_at handles the timestamp automatically).
+                    "predicted_rise_ft": self.state["predicted_rise_ft"],
+                    "lstm_accuracy_pct": self.state["lstm_accuracy_pct"],
+                    "om_temp": self.env.weather_data["om_temp"],
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 }
-            
             self.offline_queue.append(payload)
-            
-            # Send batch to Supabase
             if len(self.offline_queue) > 0:
                 try:
                     data_to_send = list(self.offline_queue)
                     self.supabase.table("StationC").insert(data_to_send).execute()
                     self.offline_queue.clear()
-                    print(f"[CLOUD] Successfully synced {len(data_to_send)} record(s) to Supabase.")
-                except Exception as e:
-                    print(f"[CLOUD ERROR] Sync failed: {e}")
+                except Exception:
+                    pass
 
 app = Flask(__name__)
 controller = TelemetryController()
