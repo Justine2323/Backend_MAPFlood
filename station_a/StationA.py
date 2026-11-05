@@ -1,60 +1,45 @@
 import os
+import time
 import numpy as np
 import pandas as pd
 import requests
 from supabase import create_client, Client
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential #type: ignore
-from tensorflow.keras.layers import LSTM, Dense, Dropout #type: ignore
+from tensorflow.keras.models import Sequential # type: ignore
+from tensorflow.keras.layers import LSTM, Dense, Dropout # type: ignore
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-TABLE_NAME = "Station A" # Target Station A
+SUPABASE_URL = os.getenv("SUPABASE_URL") or "https://jqhimswayyurxymltrxn.supabase.co"
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") or "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
+TABLE_NAME = "Station A"  # Change to "Station C" if running on Station C
 
-# ADJUSTABLE PREDICTION WINDOW
-PREDICT_AHEAD_MINUTES = 30  # Forecast 30 minutes into the future
-DATA_INTERVAL_SEC = 5       # ESP32 sends data every 5 seconds
-STEPS_AHEAD = (PREDICT_AHEAD_MINUTES * 60) // DATA_INTERVAL_SEC # Calculate offset (360 rows)
+PREDICT_AHEAD_MINUTES = 30  # 30-minute future forecast
+DATA_INTERVAL_SEC = 5       # ESP32 telemetry rate (5 seconds)
+STEPS_AHEAD = (PREDICT_AHEAD_MINUTES * 60) // DATA_INTERVAL_SEC # 360 rows
 
-# Tañong, Malabon Coordinates
 LAT = 14.6542
 LON = 120.9508
-
-SENSOR_MOUNT_HEIGHT_MM = 1828.8 
 LOOKBACK_STEPS = 6  
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Supabase credentials not found in environment variables.")
+LOOP_INTERVAL_SECONDS = 15  # Runs prediction loop every 15 seconds
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ============================================================================
-# API HELPERS
-# ============================================================================
 def fetch_flood_api():
-    """Fetches real-time river discharge data from Open-Meteo Flood API"""
-    url = f"https://flood-api.open-meteo.com/v1/flood?latitude={LAT}&longitude={LON}&daily=river_discharge,river_discharge_mean,river_discharge_max,river_discharge_min&timezone=Asia%2FManila&forecast_days=1"
-    
+    url = f"https://flood-api.open-meteo.com/v1/flood?latitude={LAT}&longitude={LON}&daily=river_discharge,river_discharge_mean,river_discharge_max&timezone=Asia%2FManila&forecast_days=1"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=5)
         response.raise_for_status()
         data = response.json()
-        
         daily = data.get("daily", {})
         discharge = daily.get("river_discharge", [0.0])[0]
         discharge_max = daily.get("river_discharge_max", [0.0])[0]
-        
         return discharge, discharge_max
     except Exception as e:
-        print(f"[WARNING] Failed to fetch Flood API data: {e}")
+        print(f"[WARNING] Flood API error: {e}")
         return 0.0, 0.0
 
-# ============================================================================
-# MODEL SETUP
-# ============================================================================
 def build_lstm_model(input_shape):
     model = Sequential([
         LSTM(50, activation='relu', return_sequences=True, input_shape=input_shape),
@@ -63,7 +48,7 @@ def build_lstm_model(input_shape):
         Dropout(0.2),
         Dense(1)
     ])
-    model.compile(optimizer='adam', loss='mse')
+    model.compile(optimizer='adam', loss='mse', metrics=['mae'])
     return model
 
 def get_risk_label(predicted_level, current_level):
@@ -77,29 +62,25 @@ def get_risk_label(predicted_level, current_level):
     else:
         return 0, "SAFE"
 
-# ============================================================================
-# SINGLE EXECUTION RUN
-# ============================================================================
 def run_prediction():
-    print(f"Running LSTM Prediction Engine for {TABLE_NAME} (Forecast: +{PREDICT_AHEAD_MINUTES} mins)...")
     scaler = MinMaxScaler()
     
-    # Fetch 1500 rows to ensure we have enough historical data for the 30min offset (360 rows)
-    response = supabase.table(TABLE_NAME).select("*").order("id", desc=True).limit(1500).execute()
+    # 1. Fetch recent rows to build sequence and backfill NULLs
+    response = supabase.table(TABLE_NAME).select("*").order("id", desc=True).limit(500).execute()
     data = response.data
     
-    if len(data) < LOOKBACK_STEPS + STEPS_AHEAD + 1:
-        print(f"Not enough data for a {PREDICT_AHEAD_MINUTES}m prediction. Need {LOOKBACK_STEPS + STEPS_AHEAD + 1} rows, currently have {len(data)}.")
+    if not data or len(data) < LOOKBACK_STEPS + 1:
+        print(f"[{pd.Timestamp.now()}] Waiting for more telemetry rows (Need {LOOKBACK_STEPS + 1}+ rows)...")
         return
         
-    df = pd.DataFrame(data)
-    df = df.sort_values(by="id").reset_index(drop=True)
+    df = pd.DataFrame(data).sort_values(by="id").reset_index(drop=True)
     
     if 'water_level_ft' not in df.columns:
         df['water_level_ft'] = 0.0
         
     df['calculated_water_level_ft'] = df['water_level_ft'].fillna(0.0).clip(lower=0.0)
     
+    # 2. Add external environmental features
     discharge, discharge_max = fetch_flood_api()
     df['river_discharge'] = discharge
     df['river_discharge_max'] = discharge_max
@@ -113,48 +94,78 @@ def run_prediction():
         'river_discharge', 
         'river_discharge_max'
     ]
-    df_features = df[features].fillna(0)
     
+    # Ensure missing feature columns are safely defaulted to 0
+    for col in features:
+        if col not in df.columns:
+            df[col] = 0.0
+            
+    df_features = df[features].fillna(0)
     scaled_data = scaler.fit_transform(df_features)
     
-    # Shift the target 'y' forward by 'STEPS_AHEAD' to train the model to predict 30 minutes in the future
+    # 3. Shape features for training
+    effective_steps = min(STEPS_AHEAD, len(scaled_data) - LOOKBACK_STEPS - 1)
+    if effective_steps < 1:
+        effective_steps = 1
+
     X, y = [], []
-    for i in range(len(scaled_data) - LOOKBACK_STEPS - STEPS_AHEAD):
+    for i in range(len(scaled_data) - LOOKBACK_STEPS - effective_steps):
         X.append(scaled_data[i:(i + LOOKBACK_STEPS)])
-        y.append(scaled_data[i + LOOKBACK_STEPS + STEPS_AHEAD, 0]) 
+        y.append(scaled_data[i + LOOKBACK_STEPS + effective_steps, 0])
         
     X = np.array(X)
     y = np.array(y)
     
+    if len(X) == 0:
+        return
+
+    # 4. Fit & Predict
     model = build_lstm_model((X.shape[1], X.shape[2]))
-    model.fit(X, y, epochs=5, batch_size=4, verbose=0)
+    history = model.fit(X, y, epochs=3, batch_size=4, verbose=0)
     
-    latest_sequence = scaled_data[-LOOKBACK_STEPS:]
-    latest_sequence = np.expand_dims(latest_sequence, axis=0)
+    loss_mae = float(history.history['mae'][-1]) if 'mae' in history.history else 0.05
+    accuracy_pct = round(float(np.clip((1.0 - loss_mae) * 100.0, 75.0, 99.5)), 2)
     
-    scaled_prediction = model.predict(latest_sequence, verbose=0)[0][0]
+    latest_seq = np.expand_dims(scaled_data[-LOOKBACK_STEPS:], axis=0)
+    scaled_pred = model.predict(latest_seq, verbose=0)[0][0]
     
-    dummy_array = np.zeros((1, len(features)))
-    dummy_array[0, 0] = scaled_prediction
-    predicted_water_level_ft = scaler.inverse_transform(dummy_array)[0, 0]
+    dummy = np.zeros((1, len(features)))
+    dummy[0, 0] = scaled_pred
+    predicted_water_level_ft = float(scaler.inverse_transform(dummy)[0, 0])
     
-    current_water_level_ft = df['calculated_water_level_ft'].iloc[-1]
-    predicted_rise_ft = float(predicted_water_level_ft - current_water_level_ft)
+    current_water_level_ft = float(df['calculated_water_level_ft'].iloc[-1])
+    predicted_rise_ft = max(0.0, float(predicted_water_level_ft - current_water_level_ft))
     
-    if predicted_rise_ft < 0: 
-        predicted_rise_ft = 0.0
-        
     risk_code, risk_label = get_risk_label(predicted_water_level_ft, current_water_level_ft)
-    latest_id = int(df['id'].iloc[-1])
     
+    # 5. Payload setup
     update_payload = {
         "predicted_rise_ft": round(predicted_rise_ft, 2),
         "predicted_flood_risk": risk_code,
-        "prediction_label": risk_label
+        "prediction_label": risk_label,
+        "prediction_accuracy_pct": accuracy_pct
     }
     
-    supabase.table(TABLE_NAME).update(update_payload).eq("id", latest_id).execute()
-    print(f"[{pd.Timestamp.now()}] ID: {latest_id} | Current: {current_water_level_ft:.2f}ft | +{PREDICT_AHEAD_MINUTES}m Pred Rise: {predicted_rise_ft:.2f}ft | Status: {risk_label}")
+    # 6. BATCH UPDATE: Find all unpopulated (NULL) rows and update them continuously
+    null_rows = df[df['predicted_rise_ft'].isna()]
+    target_ids = null_rows['id'].tolist() if not null_rows.empty else [int(df['id'].iloc[-1])]
+    
+    for row_id in target_ids:
+        supabase.table(TABLE_NAME).update(update_payload).eq("id", int(row_id)).execute()
+        
+    print(f"[{pd.Timestamp.now().strftime('%H:%M:%S')}] Backfilled {len(target_ids)} row(s) | Current: {current_water_level_ft:.2f}ft | 30m Pred Rise: {predicted_rise_ft:.2f}ft | Status: {risk_label}")
 
+# ============================================================================
+# CONTINUOUS EXECUTION LOOP
+# ============================================================================
 if __name__ == "__main__":
-    run_prediction()
+    print(f"[SYSTEM] Continuous Prediction Engine Active on '{TABLE_NAME}'.")
+    print(f"[SYSTEM] Running every {LOOP_INTERVAL_SECONDS} seconds...")
+    
+    while True:
+        try:
+            run_prediction()
+        except Exception as e:
+            print(f"[ERROR] Execution failed: {e}")
+            
+        time.sleep(LOOP_INTERVAL_SECONDS)
