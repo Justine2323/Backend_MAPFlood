@@ -12,7 +12,12 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout #type: ignore
 # ============================================================================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-TABLE_NAME = "Station A"
+TABLE_NAME = "Station A" # Target Station A
+
+# ADJUSTABLE PREDICTION WINDOW
+PREDICT_AHEAD_MINUTES = 30  # Forecast 30 minutes into the future
+DATA_INTERVAL_SEC = 5       # ESP32 sends data every 5 seconds
+STEPS_AHEAD = (PREDICT_AHEAD_MINUTES * 60) // DATA_INTERVAL_SEC # Calculate offset (360 rows)
 
 # Tañong, Malabon Coordinates
 LAT = 14.6542
@@ -39,7 +44,6 @@ def fetch_flood_api():
         data = response.json()
         
         daily = data.get("daily", {})
-        # Extract today's values
         discharge = daily.get("river_discharge", [0.0])[0]
         discharge_max = daily.get("river_discharge_max", [0.0])[0]
         
@@ -77,27 +81,25 @@ def get_risk_label(predicted_level, current_level):
 # SINGLE EXECUTION RUN
 # ============================================================================
 def run_prediction():
-    print(f"Running LSTM Prediction Engine for {TABLE_NAME}...")
+    print(f"Running LSTM Prediction Engine for {TABLE_NAME} (Forecast: +{PREDICT_AHEAD_MINUTES} mins)...")
     scaler = MinMaxScaler()
     
-    # 1. Fetch recent data from Supabase
-    response = supabase.table(TABLE_NAME).select("*").order("id", desc=True).limit(100).execute()
+    # Fetch 1500 rows to ensure we have enough historical data for the 30min offset (360 rows)
+    response = supabase.table(TABLE_NAME).select("*").order("id", desc=True).limit(1500).execute()
     data = response.data
     
-    if len(data) < LOOKBACK_STEPS + 1:
-        print(f"Not enough data to run LSTM. Need at least {LOOKBACK_STEPS + 1} rows.")
+    if len(data) < LOOKBACK_STEPS + STEPS_AHEAD + 1:
+        print(f"Not enough data for a {PREDICT_AHEAD_MINUTES}m prediction. Need {LOOKBACK_STEPS + STEPS_AHEAD + 1} rows, currently have {len(data)}.")
         return
         
     df = pd.DataFrame(data)
     df = df.sort_values(by="id").reset_index(drop=True)
     
-    # 2. Baseline Calculation (Directly using ESP32's calculated water_level_ft)
     if 'water_level_ft' not in df.columns:
         df['water_level_ft'] = 0.0
         
     df['calculated_water_level_ft'] = df['water_level_ft'].fillna(0.0).clip(lower=0.0)
     
-    # 3. Integrate External API Data
     discharge, discharge_max = fetch_flood_api()
     df['river_discharge'] = discharge
     df['river_discharge_max'] = discharge_max
@@ -113,22 +115,20 @@ def run_prediction():
     ]
     df_features = df[features].fillna(0)
     
-    # 4. Prepare Data for LSTM
     scaled_data = scaler.fit_transform(df_features)
     
+    # Shift the target 'y' forward by 'STEPS_AHEAD' to train the model to predict 30 minutes in the future
     X, y = [], []
-    for i in range(len(scaled_data) - LOOKBACK_STEPS):
+    for i in range(len(scaled_data) - LOOKBACK_STEPS - STEPS_AHEAD):
         X.append(scaled_data[i:(i + LOOKBACK_STEPS)])
-        y.append(scaled_data[i + LOOKBACK_STEPS, 0]) 
+        y.append(scaled_data[i + LOOKBACK_STEPS + STEPS_AHEAD, 0]) 
         
     X = np.array(X)
     y = np.array(y)
     
-    # 5. Train Model (Quick fit on recent batch)
     model = build_lstm_model((X.shape[1], X.shape[2]))
     model.fit(X, y, epochs=5, batch_size=4, verbose=0)
     
-    # 6. Predict the Next Step
     latest_sequence = scaled_data[-LOOKBACK_STEPS:]
     latest_sequence = np.expand_dims(latest_sequence, axis=0)
     
@@ -144,7 +144,6 @@ def run_prediction():
     if predicted_rise_ft < 0: 
         predicted_rise_ft = 0.0
         
-    # 7. Assess Risk & Update Supabase
     risk_code, risk_label = get_risk_label(predicted_water_level_ft, current_water_level_ft)
     latest_id = int(df['id'].iloc[-1])
     
@@ -155,7 +154,7 @@ def run_prediction():
     }
     
     supabase.table(TABLE_NAME).update(update_payload).eq("id", latest_id).execute()
-    print(f"[{pd.Timestamp.now()}] ID: {latest_id} | Discharge: {discharge} | Current: {current_water_level_ft:.2f}ft | Pred Rise: {predicted_rise_ft:.2f}ft | Status: {risk_label}")
+    print(f"[{pd.Timestamp.now()}] ID: {latest_id} | Current: {current_water_level_ft:.2f}ft | +{PREDICT_AHEAD_MINUTES}m Pred Rise: {predicted_rise_ft:.2f}ft | Status: {risk_label}")
 
 if __name__ == "__main__":
     run_prediction()
