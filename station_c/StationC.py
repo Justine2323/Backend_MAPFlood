@@ -327,23 +327,54 @@ class TelemetryController:
         while True:
             time.sleep(3)
             with self.telemetry_lock:
+                # 1. Determine distance_data based on detected color / tier
+                tier = self.state["water_tier"]
+                if tier == 1:
+                    dist_data = "0-1ft (Safe)"
+                elif tier == 2:
+                    dist_data = "1-2ft (Warning)"
+                elif tier == 3:
+                    dist_data = "2-3ft (Danger)"
+                else:
+                    dist_data = "Unknown"
+
+                # 2. Determine prediction risk and label from LSTM output
+                pred_rise = self.state["predicted_rise_ft"]
+                if pred_rise <= 1.0:
+                    pred_risk = 1
+                    pred_label = "Low Risk"
+                elif 1.0 < pred_rise <= 2.0:
+                    pred_risk = 2
+                    pred_label = "Moderate Risk"
+                else:
+                    pred_risk = 3
+                    pred_label = "High Risk"
+
+                # 3. Build the payload matching the Supabase schema perfectly
                 payload = {
                     "detected_color": self.state["color"],
-                    "water_tier": self.state["water_tier"],
+                    "water_tier": tier,
+                    "distance_data": dist_data,
                     "status": self.state["status"],
-                    "predicted_rise_ft": self.state["predicted_rise_ft"],
-                    "lstm_accuracy_pct": self.state["lstm_accuracy_pct"],
-                    "om_temp": self.env.weather_data["om_temp"],
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    "predicted_flood_risk": pred_risk,
+                    "prediction_label": pred_label,
+                    "predicted_rise_ft": float(pred_rise),
+                    "prediction_accuracy_pct": float(self.state["lstm_accuracy_pct"]) # Renamed to match your DB column
+                    # Removed om_temp and timestamp if they aren't explicitly in your Supabase schema, 
+                    # or you can keep them if your table has them (created_at handles the timestamp automatically).
                 }
+            
             self.offline_queue.append(payload)
+            
+            # Send batch to Supabase
             if len(self.offline_queue) > 0:
                 try:
                     data_to_send = list(self.offline_queue)
                     self.supabase.table("StationC").insert(data_to_send).execute()
                     self.offline_queue.clear()
-                except Exception:
-                    pass
+                    print(f"[CLOUD] Successfully synced {len(data_to_send)} record(s) to Supabase.")
+                except Exception as e:
+                    print(f"[CLOUD ERROR] Sync failed: {e}")
 
 app = Flask(__name__)
 controller = TelemetryController()
