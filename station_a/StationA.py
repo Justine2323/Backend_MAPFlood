@@ -4,8 +4,8 @@ import pandas as pd
 import requests
 from supabase import create_client, Client
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.models import Sequential #type: ignore
+from tensorflow.keras.layers import LSTM, Dense, Dropout #type: ignore
 
 # ============================================================================
 # CONFIGURATION
@@ -91,17 +91,17 @@ def run_prediction():
     df = pd.DataFrame(data)
     df = df.sort_values(by="id").reset_index(drop=True)
     
-    # 2. Baseline Calculation
-    df['tof_distance_mm'] = df['tof_distance_mm'].fillna(SENSOR_MOUNT_HEIGHT_MM)
-    df['calculated_water_level_ft'] = (SENSOR_MOUNT_HEIGHT_MM - df['tof_distance_mm']) / 304.8
-    df['calculated_water_level_ft'] = df['calculated_water_level_ft'].clip(lower=0.0)
+    # 2. Baseline Calculation (Directly using ESP32's calculated water_level_ft)
+    if 'water_level_ft' not in df.columns:
+        df['water_level_ft'] = 0.0
+        
+    df['calculated_water_level_ft'] = df['water_level_ft'].fillna(0.0).clip(lower=0.0)
     
     # 3. Integrate External API Data
     discharge, discharge_max = fetch_flood_api()
     df['river_discharge'] = discharge
     df['river_discharge_max'] = discharge_max
     
-    # Notice we appended the new API features here:
     features = [
         'calculated_water_level_ft', 
         'rain_percent', 
@@ -119,7 +119,7 @@ def run_prediction():
     X, y = [], []
     for i in range(len(scaled_data) - LOOKBACK_STEPS):
         X.append(scaled_data[i:(i + LOOKBACK_STEPS)])
-        y.append(scaled_data[i + LOOKBACK_STEPS, 0])  # Target remains water level
+        y.append(scaled_data[i + LOOKBACK_STEPS, 0]) 
         
     X = np.array(X)
     y = np.array(y)
