@@ -46,7 +46,7 @@ class Config:
     # =========================================================================
     # Position offset relative to frame center (0,0 = exact middle of screen)
     ROI_OFFSET_X = 0       # Positive = shift right, Negative = shift left
-    ROI_OFFSET_Y = 40      # Positive = shift down toward bottom curve of pipe
+    ROI_OFFSET_Y = 10      # Positive = shift down toward bottom curve of pipe
     
     # Independent box dimensions (pixels)
     ROI_WIDTH = 70         # Horizontal box width
