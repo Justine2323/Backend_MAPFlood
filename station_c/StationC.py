@@ -59,9 +59,9 @@ class Config:
     MIN_VALUE = 20
     
     # Recalibrated to standard OpenCV 0-180 Hue bands:
-    RED_H_MIN, RED_H_MAX = 0, 10         # Pure Red band (also wraps at 170-180)
-    ORANGE_H_MIN, ORANGE_H_MAX = 11, 35  # Orange band (matches H=31 to H=33)
-    GREEN_H_MIN, GREEN_H_MAX = 36, 85    # Green band
+    RED_H_MIN, RED_H_MAX = 0, 20         # Pure Red band (also wraps at 170-180)
+    ORANGE_H_MIN, ORANGE_H_MAX = 21, 80  # Orange band (matches H=31 to H=33)
+    GREEN_H_MIN, GREEN_H_MAX = 81, 100    # Green band
 
 class StateManager:
     @staticmethod
