@@ -45,7 +45,7 @@ class Config:
     # --- ROI (REGION OF INTEREST) BOX CONTROL ---
     # =========================================================================
     # Position offset relative to frame center (0,0 = exact middle of screen)
-    ROI_OFFSET_X = 30       # Positive = shift right, Negative = shift left
+    ROI_OFFSET_X = 28       # Positive = shift right, Negative = shift left
     ROI_OFFSET_Y = -55      # Positive = shift down toward bottom curve of pipe
     
     # Independent box dimensions (pixels)
