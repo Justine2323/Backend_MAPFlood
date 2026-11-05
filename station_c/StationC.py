@@ -14,7 +14,7 @@ from supabase import Client, create_client  # type: ignore
 
 # Suppress verbose TensorFlow and OpenCV warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['OPENCV_LOG_LEVEL'] = 'FATAL' 
+os.environ['OPENCV_LOG_LEVEL'] = 'FATAL'
 
 from tensorflow.keras.models import Sequential  # type: ignore
 from tensorflow.keras.layers import LSTM, Dense, Input  # type: ignore
@@ -22,8 +22,10 @@ from tensorflow.keras.layers import LSTM, Dense, Input  # type: ignore
 class Config:
     SUPABASE_URL = "https://jqhimswayyurxymltrxn.supabase.co"
     SUPABASE_KEY = "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
-    TANONG_LAT = 14.6577
-    TANONG_LON = 120.9537
+    
+    # Geographical coordinates for Barangay Tañong, Malabon City
+    TANONG_LAT = 14.6542
+    TANONG_LON = 120.9508
     
     SIREN_PIN = 17
     RAIN_GPIO_PIN = 27
@@ -39,14 +41,27 @@ class Config:
     STATE_FILE = "station_c_state.json"
     CAMERA_INDICES = [0, 1]
     
-    # --- EASY COLOR THRESHOLD ADJUSTMENTS ---
+    # =========================================================================
+    # --- ROI (REGION OF INTEREST) BOX CONTROL ---
+    # =========================================================================
+    # Position offset relative to frame center (0,0 = exact middle of screen)
+    ROI_OFFSET_X = 0       # Positive = shift right, Negative = shift left
+    ROI_OFFSET_Y = 30      # Positive = shift down toward bottom curve of pipe
+    
+    # Independent box dimensions (pixels)
+    ROI_WIDTH = 70         # Horizontal box width
+    ROI_HEIGHT = 70        # Vertical box height
+
+    # =========================================================================
+    # --- OPENCV COLOR THRESHOLDS (Scale: H 0-180, S 0-255, V 0-255) ---
+    # =========================================================================
     MIN_SATURATION = 40
     MIN_VALUE = 40
     
-    # Calibrated to actual hardware HSV readings
-    RED_H_MIN, RED_H_MAX = 1, 40       # Targets H=122
-    ORANGE_H_MIN, ORANGE_H_MAX = 40, 70   # Targets H=33
-    GREEN_H_MIN, GREEN_H_MAX = 80, 100    # Targets H=91
+    # Recalibrated to standard OpenCV 0-180 Hue bands:
+    RED_H_MIN, RED_H_MAX = 0, 10         # Pure Red band (also wraps at 170-180)
+    ORANGE_H_MIN, ORANGE_H_MAX = 11, 35  # Orange band (matches H=31 to H=33)
+    GREEN_H_MIN, GREEN_H_MAX = 36, 85    # Green band
 
 class StateManager:
     @staticmethod
@@ -55,7 +70,7 @@ class StateManager:
             try:
                 with open(Config.STATE_FILE, 'r') as f:
                     return json.load(f)
-            except Exception as e:
+            except Exception:
                 pass
         return {
             "color": "Unknown",
@@ -100,19 +115,16 @@ class HardwareInterface:
             self.gpio_available = True
             print("[INFO] Raspberry Pi 5 GPIO initialized successfully.")
         except Exception:
-            print(f"[WARNING] GPIO Initialization skipped. Running in simulation mode.")
+            print("[WARNING] GPIO Initialization skipped. Running in simulation mode.")
 
     def set_led_strip(self, tier: int):
-        """Changes the LED strip color based on the current water tier."""
         if not self.gpio_available:
             return
 
-        # Turn all off to reset
         self.led_green.off()
         self.led_orange.off()
         self.led_red.off()
 
-        # Activate the correct LED based on the HSV tier
         if tier == 1:
             self.led_green.on()
         elif tier == 2:
@@ -122,15 +134,12 @@ class HardwareInterface:
 
     def _init_camera(self):
         for idx in Config.CAMERA_INDICES:
-            # Explicitly force the V4L2 backend (cv2.CAP_V4L2)
             temp_cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
             if temp_cap.isOpened():
-                # Set format to MJPG to avoid buffer lockup on Raspberry Pi 5
                 temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 
-                # Flush initial buffer
                 for _ in range(3):
                     ret, frame = temp_cap.read()
                 
@@ -244,24 +253,30 @@ class TelemetryController:
 
     def process_frame(self, frame):
         height, width, _ = frame.shape
-        cx, cy = width // 2, height // 2
         
-        # --- CHANGE THIS VALUE TO MAKE THE BOX SMALLER ---
-        box_size = 50  # Changed from 150 to 50
-        # -------------------------------------------------
+        # Calculate dynamic box center with offsets
+        cx = (width // 2) + Config.ROI_OFFSET_X
+        cy = (height // 2) + Config.ROI_OFFSET_Y
+        
+        half_w = Config.ROI_WIDTH // 2
+        half_h = Config.ROI_HEIGHT // 2
 
-        x1, y1 = max(0, cx - box_size), max(0, cy - box_size)
-        x2, y2 = min(width, cx + box_size), min(height, cy + box_size)
+        # Boundary checks
+        x1 = max(0, cx - half_w)
+        y1 = max(0, cy - half_h)
+        x2 = min(width, cx + half_w)
+        y2 = min(height, cy + half_h)
+        
         roi = frame[y1:y2, x1:x2]
         
         hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mean_hsv = cv2.mean(hsv_roi)
         h, s, v = int(mean_hsv[0]), int(mean_hsv[1]), int(mean_hsv[2])
 
-        # Using hardware-calibrated Config thresholds
+        # Color classification logic using updated OpenCV 0-180 scale
         if s < Config.MIN_SATURATION or v < Config.MIN_VALUE:
             tier, color_name, status = self.state["water_tier"], "Unknown", "Low Light / Unknown"
-        elif Config.RED_H_MIN <= h <= Config.RED_H_MAX:
+        elif (Config.RED_H_MIN <= h <= Config.RED_H_MAX) or (h >= 170):
             color_name, tier, status = "Red", 3, "DANGER (2-3ft)"
         elif Config.ORANGE_H_MIN <= h <= Config.ORANGE_H_MAX:
             color_name, tier, status = "Orange", 2, "WARNING (1-2ft)"
@@ -278,6 +293,7 @@ class TelemetryController:
                 self.state["actual_water_level_ft"] = float(tier)
             StateManager.save_state(self.state)
 
+        # Draw box and status overlay
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
         cv2.putText(frame, f"Color: {color_name}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         cv2.putText(frame, f"Status: {status}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
@@ -326,9 +342,7 @@ class TelemetryController:
                     data_to_send = list(self.offline_queue)
                     self.supabase.table("StationC").insert(data_to_send).execute()
                     self.offline_queue.clear()
-                    #print(f"[SUPABASE] Successfully sent {len(data_to_send)} records.")
-                except Exception as e:
-                    #print(f"[SUPABASE ERROR] {e}")
+                except Exception:
                     pass
 
 app = Flask(__name__)
