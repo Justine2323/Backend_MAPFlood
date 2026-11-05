@@ -247,6 +247,9 @@ class TelemetryController:
         self.offline_queue = deque(maxlen=50)
         self.telemetry_lock = threading.Lock()
 
+        # ROLLING BUFFER: Stores last 5 frame color detections to filter out noise
+        self.color_history = deque(maxlen=5)
+
         threading.Thread(target=self._hardware_loop, daemon=True).start()
         threading.Thread(target=self._lstm_loop, daemon=True).start()
         threading.Thread(target=self._cloud_sync_loop, daemon=True).start()
@@ -254,48 +257,68 @@ class TelemetryController:
     def process_frame(self, frame):
         height, width, _ = frame.shape
         
-        # Calculate dynamic box center with offsets
         cx = (width // 2) + Config.ROI_OFFSET_X
         cy = (height // 2) + Config.ROI_OFFSET_Y
         
         half_w = Config.ROI_WIDTH // 2
         half_h = Config.ROI_HEIGHT // 2
 
-        # Boundary checks
         x1 = max(0, cx - half_w)
         y1 = max(0, cy - half_h)
         x2 = min(width, cx + half_w)
         y2 = min(height, cy + half_h)
         
         roi = frame[y1:y2, x1:x2]
-        
         hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mean_hsv = cv2.mean(hsv_roi)
         h, s, v = int(mean_hsv[0]), int(mean_hsv[1]), int(mean_hsv[2])
 
-        # Color classification logic using updated OpenCV 0-180 scale
+        # Evaluate raw frame color
         if s < Config.MIN_SATURATION or v < Config.MIN_VALUE:
-            tier, color_name, status = self.state["water_tier"], "Unknown", "Low Light / Unknown"
+            raw_color = "Unknown"
         elif (Config.RED_H_MIN <= h <= Config.RED_H_MAX) or (h >= 170):
-            color_name, tier, status = "Red", 3, "DANGER (2-3ft)"
+            raw_color = "Red"
         elif Config.ORANGE_H_MIN <= h <= Config.ORANGE_H_MAX:
-            color_name, tier, status = "Orange", 2, "WARNING (1-2ft)"
+            raw_color = "Orange"
         elif Config.GREEN_H_MIN <= h <= Config.GREEN_H_MAX:
-            color_name, tier, status = "Green", 1, "SAFE (0-1ft)"
+            raw_color = "Green"
         else:
-            tier, color_name, status = self.state["water_tier"], "Unknown", "Unknown"
+            raw_color = "Unknown"
+
+        # Push raw reading to rolling buffer
+        self.color_history.append(raw_color)
+
+        # MAJORITY VOTE: Determine dominant color across the last 5 frames
+        valid_colors = [c for c in self.color_history if c != "Unknown"]
+        
+        if valid_colors:
+            # Pick the most frequent valid color detected in recent frames
+            smoothed_color = Counter(valid_colors).most_common(1)[0][0]
+        else:
+            # Fallback to current state color if all recent frames were noise
+            smoothed_color = self.state.get("color", "Unknown")
+
+        # Map smoothed color to water tier and status string
+        if smoothed_color == "Red":
+            tier, status = 3, "DANGER (2-3ft)"
+        elif smoothed_color == "Orange":
+            tier, status = 2, "WARNING (1-2ft)"
+        elif smoothed_color == "Green":
+            tier, status = 1, "SAFE (0-1ft)"
+        else:
+            tier, status = 0, "Idle"
 
         with self.telemetry_lock:
-            self.state["color"] = color_name
+            self.state["color"] = smoothed_color
             self.state["water_tier"] = tier
             self.state["status"] = status
             if tier > 0:
                 self.state["actual_water_level_ft"] = float(tier)
             StateManager.save_state(self.state)
 
-        # Draw box and status overlay
+        # Draw overlay
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
-        cv2.putText(frame, f"Color: {color_name}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        cv2.putText(frame, f"Color: {smoothed_color}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         cv2.putText(frame, f"Status: {status}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         cv2.putText(frame, f"LSTM Acc: {self.state['lstm_accuracy_pct']:.1f}%", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.putText(frame, f"HSV: {h}, {s}, {v}", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 255), 2)
