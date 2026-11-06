@@ -6,23 +6,23 @@ import requests
 from supabase import create_client, Client
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential # type: ignore
-from tensorflow.keras.layers import LSTM, Dense, Dropout # type: ignore
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input # type: ignore
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 SUPABASE_URL = os.getenv("SUPABASE_URL") or "https://jqhimswayyurxymltrxn.supabase.co"
 SUPABASE_KEY = os.getenv("SUPABASE_KEY") or "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
-TABLE_NAME = "Station A"  # Change to "Station C" if running on Station C
+TABLE_NAME = "Station A"
 
-PREDICT_AHEAD_MINUTES = 30  # 30-minute future forecast
-DATA_INTERVAL_SEC = 5       # ESP32 telemetry rate (5 seconds)
+PREDICT_AHEAD_MINUTES = 30
+DATA_INTERVAL_SEC = 5
 STEPS_AHEAD = (PREDICT_AHEAD_MINUTES * 60) // DATA_INTERVAL_SEC # 360 rows
 
 LAT = 14.6542
 LON = 120.9508
 LOOKBACK_STEPS = 6  
-LOOP_INTERVAL_SECONDS = 15  # Runs prediction loop every 15 seconds
+LOOP_INTERVAL_SECONDS = 15
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -41,8 +41,10 @@ def fetch_flood_api():
         return 0.0, 0.0
 
 def build_lstm_model(input_shape):
+    # Fixed Keras warning by using Explicit Input Layer
     model = Sequential([
-        LSTM(50, activation='relu', return_sequences=True, input_shape=input_shape),
+        Input(shape=input_shape),
+        LSTM(50, activation='relu', return_sequences=True),
         Dropout(0.2),
         LSTM(50, activation='relu'),
         Dropout(0.2),
@@ -65,12 +67,11 @@ def get_risk_label(predicted_level, current_level):
 def run_prediction():
     scaler = MinMaxScaler()
     
-    # 1. Fetch recent rows to build sequence and backfill NULLs
     response = supabase.table(TABLE_NAME).select("*").order("id", desc=True).limit(500).execute()
     data = response.data
     
     if not data or len(data) < LOOKBACK_STEPS + 1:
-        print(f"[{pd.Timestamp.now()}] Waiting for more telemetry rows (Need {LOOKBACK_STEPS + 1}+ rows)...")
+        print(f"[{pd.Timestamp.now()}] Waiting for telemetry rows...")
         return
         
     df = pd.DataFrame(data).sort_values(by="id").reset_index(drop=True)
@@ -80,7 +81,6 @@ def run_prediction():
         
     df['calculated_water_level_ft'] = df['water_level_ft'].fillna(0.0).clip(lower=0.0)
     
-    # 2. Add external environmental features
     discharge, discharge_max = fetch_flood_api()
     df['river_discharge'] = discharge
     df['river_discharge_max'] = discharge_max
@@ -95,7 +95,6 @@ def run_prediction():
         'river_discharge_max'
     ]
     
-    # Ensure missing feature columns are safely defaulted to 0
     for col in features:
         if col not in df.columns:
             df[col] = 0.0
@@ -103,7 +102,6 @@ def run_prediction():
     df_features = df[features].fillna(0)
     scaled_data = scaler.fit_transform(df_features)
     
-    # 3. Shape features for training
     effective_steps = min(STEPS_AHEAD, len(scaled_data) - LOOKBACK_STEPS - 1)
     if effective_steps < 1:
         effective_steps = 1
@@ -119,7 +117,6 @@ def run_prediction():
     if len(X) == 0:
         return
 
-    # 4. Fit & Predict
     model = build_lstm_model((X.shape[1], X.shape[2]))
     history = model.fit(X, y, epochs=3, batch_size=4, verbose=0)
     
@@ -138,7 +135,6 @@ def run_prediction():
     
     risk_code, risk_label = get_risk_label(predicted_water_level_ft, current_water_level_ft)
     
-    # 5. Payload setup
     update_payload = {
         "predicted_rise_ft": round(predicted_rise_ft, 2),
         "predicted_flood_risk": risk_code,
@@ -146,7 +142,6 @@ def run_prediction():
         "prediction_accuracy_pct": accuracy_pct
     }
     
-    # 6. BATCH UPDATE: Find all unpopulated (NULL) rows and update them continuously
     null_rows = df[df['predicted_rise_ft'].isna()]
     target_ids = null_rows['id'].tolist() if not null_rows.empty else [int(df['id'].iloc[-1])]
     
@@ -155,17 +150,6 @@ def run_prediction():
         
     print(f"[{pd.Timestamp.now().strftime('%H:%M:%S')}] Backfilled {len(target_ids)} row(s) | Current: {current_water_level_ft:.2f}ft | 30m Pred Rise: {predicted_rise_ft:.2f}ft | Status: {risk_label}")
 
-# ============================================================================
-# CONTINUOUS EXECUTION LOOP
-# ============================================================================
 if __name__ == "__main__":
-    print(f"[SYSTEM] Continuous Prediction Engine Active on '{TABLE_NAME}'.")
-    print(f"[SYSTEM] Running every {LOOP_INTERVAL_SECONDS} seconds...")
-    
-    while True:
-        try:
-            run_prediction()
-        except Exception as e:
-            print(f"[ERROR] Execution failed: {e}")
-            
-        time.sleep(LOOP_INTERVAL_SECONDS)
+    print(f"[SYSTEM] Prediction task started on '{TABLE_NAME}'.")
+    run_prediction()
