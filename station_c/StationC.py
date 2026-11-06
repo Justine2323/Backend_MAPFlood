@@ -19,6 +19,15 @@ os.environ['OPENCV_LOG_LEVEL'] = 'FATAL'
 from tensorflow.keras.models import Sequential  # type: ignore
 from tensorflow.keras.layers import LSTM, Dense, Input  # type: ignore
 
+try:
+    from luma.core.interface.serial import spi 
+    from luma.lcd.device import st7565
+    from PIL import Image, ImageDraw, ImageFont
+    LUMA_AVAILABLE = True
+except ImportError:
+    LUMA_AVAILABLE = False
+    print("[WARNING] LCD libraries not found. Run: pip install luma.lcd luma.core Pillow")
+
 class Config:
     SUPABASE_URL = "https://jqhimswayyurxymltrxn.supabase.co"
     SUPABASE_KEY = "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
@@ -88,6 +97,47 @@ class StateManager:
                 json.dump(state_dict, f)
         except Exception:
             pass
+
+class LCDDisplay:
+    def __init__(self):
+        self.device = None
+        if LUMA_AVAILABLE:
+            try:
+                # Initialize ST7565 over SPI using Luma
+                serial_interface = spi(port=0, device=0, gpio_DC=Config.LCD_DC_PIN, gpio_RST=Config.LCD_RST_PIN)
+                self.device = st7565(serial_interface)
+                self.font = ImageFont.load_default()
+                print("[INFO] LCD ST7565 Initialized via SPI.")
+            except Exception as e:
+                print(f"[WARNING] LCD Initialization failed (Running headless): {e}")
+
+    def update_display(self, water_level, pred_rise, wind_kmh, camera_color):
+        if self.device is None:
+            return
+        
+        # Create a blank canvas
+        image = Image.new("1", (self.device.width, self.device.height))
+        draw = ImageDraw.Draw(image)
+        
+        # --- UI LAYOUT MIRRORING STATION A ---
+        
+        # Row 1: Actual Water Level
+        draw.text((26, 2), "Actual Water level:", font=self.font, fill="white")
+        draw.text((46, 12), f"{float(water_level):.2f} ft", font=self.font, fill="white")
+        
+        # Row 2: Predicted Rise
+        draw.text((32, 24), "Predicted Rise:", font=self.font, fill="white")
+        draw.text((46, 34), f"{float(pred_rise):.2f} ft (L)", font=self.font, fill="white")
+        
+        # Row 3: Wind Speed & Camera Color (Replaced TOF)
+        draw.text((5, 46), "Wind Speed:", font=self.font, fill="white")
+        draw.text((5, 56), f"{wind_kmh:.1f}km/h", font=self.font, fill="white")
+        
+        draw.text((66, 46), "Camera Color:", font=self.font, fill="white")
+        draw.text((74, 56), f"{camera_color}", font=self.font, fill="white")
+        
+        # Push image frame to hardware
+        self.device.display(image)
 
 class HardwareInterface:
     def __init__(self):
@@ -242,6 +292,7 @@ class TelemetryController:
         self.hw = HardwareInterface()
         self.env = EnvironmentAPI()
         self.lstm = LSTMPredictor()
+        self.lcd = LCDDisplay()  
         self.supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
         self.state = StateManager.load_state()
         self.offline_queue = deque(maxlen=50)
@@ -305,13 +356,21 @@ class TelemetryController:
         while True:
             rain_pct = self.hw.read_rain()
             wind_kmh = self.hw.read_wind()
+
             with self.telemetry_lock:
                 tier = self.state["water_tier"]
+                current_color = self.state["color"]
+                pred_rise = self.state.get("predicted_rise_ft", 0.0)
+
             trigger_siren = (tier >= 3) or (rain_pct >= Config.SIREN_TRIGGER_RAIN_PERCENT) or (wind_kmh >= Config.SIREN_TRIGGER_WIND_KMH)
             self.hw.set_siren(trigger_siren)
             self.hw.set_led_strip(tier)
+
             env = self.env.weather_data
             self.lstm.record_step(tier, rain_pct, env["om_temp"], env["rain_percent_api"])
+
+            self.lcd.update_display(tier, pred_rise, wind_kmh, current_color)
+
             time.sleep(1.0)
 
     def _lstm_loop(self):
