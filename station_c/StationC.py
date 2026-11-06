@@ -28,6 +28,14 @@ except ImportError:
     LUMA_AVAILABLE = False
     print("[WARNING] LCD libraries not found. Run: pip install luma.lcd luma.core Pillow")
 
+try:
+    import board #type: ignore
+    import neopixel #type: ignore
+    NEOPIXEL_AVAILABLE = True
+except ImportError:
+    NEOPIXEL_AVAILABLE = False
+    print("[WARNING] NeoPixel libraries not found. Run: pip install adafruit-circuitpython-neopixel")
+
 class Config:
     SUPABASE_URL = "https://jqhimswayyurxymltrxn.supabase.co"
     SUPABASE_KEY = "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
@@ -43,17 +51,16 @@ class Config:
     RAIN_GPIO_PIN = 27        # Digital Rain Sensor (Physical Pin 13)
     WIND_GPIO_PIN = 22        # Anemometer Wind Sensor (Physical Pin 15)
     
-    # LED Indicator Strip Pins
-    LED_GREEN_PIN = 23        # Tier 1 / Safe LED (Physical Pin 16)
-    LED_ORANGE_PIN = 24       # Tier 2 / Warning LED (Physical Pin 18)
-    LED_RED_PIN = 25          # Tier 3 / Danger LED (Physical Pin 22)
+    # --- ADDRESSABLE LED STRIP CONFIGURATION ---
+    LED_STRIP_SIGNAL_PIN = 18 # Signal pin for LED Strip (Physical Pin 12 / PWM0)
+    LED_STRIP_COUNT = 8       # Change this to the number of LEDs on your strip
+    LED_BRIGHTNESS = 0.5      # 0.0 (Off) to 1.0 (Max Brightness)
     
     # ST7565 LCD Screen Pins (Hardware SPI 0)
     LCD_SPI_PORT = 0          # SPI Port 0
     LCD_SPI_DEVICE = 0        # SPI Chip Select 0 (CS0 = GPIO 8 / Pin 24)
     LCD_DC_PIN = 5            # RS / Data-Command Select (Physical Pin 29)
     LCD_RST_PIN = 6           # RSE / Reset Pin (Physical Pin 31)
-    # Note: SCL (Clock) = GPIO 11 (Pin 23), SI (MOSI) = GPIO 10 (Pin 19)
     # =========================================================================
 
     SIREN_TRIGGER_RAIN_PERCENT = 50
@@ -62,19 +69,17 @@ class Config:
     STATE_FILE = "station_c_state.json"
     CAMERA_INDICES = [0, 1]
     
-    # --- ROI (REGION OF INTEREST) BOX CONTROL ---
-    ROI_OFFSET_X = 27       # Positive = shift right, Negative = shift left
-    ROI_OFFSET_Y = -55      # Positive = shift down toward bottom curve of pipe
-    ROI_WIDTH = 70         # Horizontal box width
-    ROI_HEIGHT = 70        # Vertical box height
+    ROI_OFFSET_X = 27
+    ROI_OFFSET_Y = -55
+    ROI_WIDTH = 70
+    ROI_HEIGHT = 70
 
-    # --- OPENCV COLOR THRESHOLDS (Scale: H 0-180, S 0-255, V 0-255) ---
     MIN_SATURATION = 20
     MIN_VALUE = 20
     
-    RED_H_MIN, RED_H_MAX = 0, 20         # Pure Red band
-    ORANGE_H_MIN, ORANGE_H_MAX = 21, 80  # Orange band
-    GREEN_H_MIN, GREEN_H_MAX = 81, 100   # Green band
+    RED_H_MIN, RED_H_MAX = 0, 20
+    ORANGE_H_MIN, ORANGE_H_MAX = 21, 80
+    GREEN_H_MIN, GREEN_H_MAX = 81, 100
 
 class StateManager:
     @staticmethod
@@ -107,7 +112,6 @@ class LCDDisplay:
         self.device = None
         if LUMA_AVAILABLE:
             try:
-                # Initialize ST7565 over Hardware SPI using Config pins
                 serial_interface = spi(
                     port=Config.LCD_SPI_PORT, 
                     device=Config.LCD_SPI_DEVICE, 
@@ -118,33 +122,27 @@ class LCDDisplay:
                 self.font = ImageFont.load_default()
                 print("[INFO] ST7565 LCD Display initialized via SPI successfully.")
             except Exception as e:
-                print(f"[WARNING] LCD Display initialization failed (Running headless): {e}")
+                print(f"[WARNING] LCD Display initialization failed: {e}")
 
     def update_display(self, water_level, pred_rise, wind_kmh, camera_color):
         if self.device is None:
             return
         
-        # Create a monochrome image canvas
         image = Image.new("1", (self.device.width, self.device.height))
         draw = ImageDraw.Draw(image)
         
-        # --- LCD DISPLAY LAYOUT ---
-        # Row 1: Water Tier Level
         draw.text((26, 2), "Actual Water level:", font=self.font, fill="white")
         draw.text((46, 12), f"{float(water_level):.2f} ft", font=self.font, fill="white")
         
-        # Row 2: 30-Minute Predicted Rise
         draw.text((32, 24), "Predicted Rise:", font=self.font, fill="white")
         draw.text((46, 34), f"{float(pred_rise):.2f} ft (L)", font=self.font, fill="white")
         
-        # Row 3: Environmental Wind & Optical Camera Reading
         draw.text((5, 46), "Wind Speed:", font=self.font, fill="white")
         draw.text((5, 56), f"{wind_kmh:.1f}km/h", font=self.font, fill="white")
         
         draw.text((66, 46), "Camera Color:", font=self.font, fill="white")
         draw.text((74, 56), f"{camera_color}", font=self.font, fill="white")
         
-        # Push frame to LCD
         self.device.display(image)
 
 class HardwareInterface:
@@ -154,41 +152,55 @@ class HardwareInterface:
         self.rain_sensor = None
         self.wind_sensor = None
         self.cap = None
-        self.led_green = None
-        self.led_orange = None
-        self.led_red = None
+        self.led_strip = None
         self._init_gpio()
         self._init_camera()
 
     def _init_gpio(self):
         try:
-            from gpiozero import DigitalInputDevice, DigitalOutputDevice, LED  # type: ignore
+            from gpiozero import DigitalInputDevice, DigitalOutputDevice  # type: ignore
             self.siren = DigitalOutputDevice(Config.SIREN_PIN)
             self.siren.off()
             self.rain_sensor = DigitalInputDevice(Config.RAIN_GPIO_PIN, pull_up=True)
             self.wind_sensor = DigitalInputDevice(Config.WIND_GPIO_PIN, pull_up=True)
-            self.led_green = LED(Config.LED_GREEN_PIN)
-            self.led_orange = LED(Config.LED_ORANGE_PIN)
-            self.led_red = LED(Config.LED_RED_PIN)
             self.gpio_available = True
-            print("[INFO] Raspberry Pi 5 GPIO initialized successfully.")
+            print("[INFO] GPIO sensors initialized successfully.")
         except Exception:
             print("[WARNING] GPIO Initialization skipped. Running in simulation mode.")
 
+        # Initialize Addressable LED Strip
+        if NEOPIXEL_AVAILABLE:
+            try:
+                # Map the Config pin to the board (e.g. board.D18)
+                pin = getattr(board, f"D{Config.LED_STRIP_SIGNAL_PIN}")
+                self.led_strip = neopixel.NeoPixel(
+                    pin, 
+                    Config.LED_STRIP_COUNT, 
+                    brightness=Config.LED_BRIGHTNESS, 
+                    auto_write=False
+                )
+                self.led_strip.fill((0, 0, 0)) # Start turned off
+                self.led_strip.show()
+                print(f"[INFO] LED Strip initialized on GPIO {Config.LED_STRIP_SIGNAL_PIN}")
+            except Exception as e:
+                print(f"[WARNING] LED Strip init failed (Try running script with sudo): {e}")
+
     def set_led_strip(self, tier: int):
-        if not self.gpio_available:
+        if not self.led_strip:
             return
 
-        self.led_green.off()
-        self.led_orange.off()
-        self.led_red.off()
-
+        # Assign color based on tier (RGB format)
         if tier == 1:
-            self.led_green.on()
+            color = (0, 255, 0)     # Green for Safe
         elif tier == 2:
-            self.led_orange.on()
+            color = (255, 128, 0)   # Orange for Warning
         elif tier >= 3:
-            self.led_red.on()
+            color = (255, 0, 0)     # Red for Danger
+        else:
+            color = (0, 0, 0)       # Off
+
+        self.led_strip.fill(color)
+        self.led_strip.show()
 
     def _init_camera(self):
         for idx in Config.CAMERA_INDICES:
@@ -368,12 +380,13 @@ class TelemetryController:
 
             trigger_siren = (tier >= 3) or (rain_pct >= Config.SIREN_TRIGGER_RAIN_PERCENT) or (wind_kmh >= Config.SIREN_TRIGGER_WIND_KMH)
             self.hw.set_siren(trigger_siren)
+            
+            # Pass the tier to the new LED Strip function
             self.hw.set_led_strip(tier)
 
             env = self.env.weather_data
             self.lstm.record_step(tier, rain_pct, env["om_temp"], env["rain_percent_api"])
 
-            # Push telemetry values to LCD Display
             self.lcd.update_display(tier, pred_rise, wind_kmh, current_color)
 
             time.sleep(1.0)
