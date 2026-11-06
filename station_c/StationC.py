@@ -20,8 +20,8 @@ from tensorflow.keras.models import Sequential  # type: ignore
 from tensorflow.keras.layers import LSTM, Dense, Input  # type: ignore
 
 try:
-    from luma.core.interface.serial import spi 
-    from luma.lcd.device import st7565
+    from luma.core.interface.serial import spi  # type: ignore
+    from luma.lcd.device import st7565  # type: ignore
     from PIL import Image, ImageDraw, ImageFont
     LUMA_AVAILABLE = True
 except ImportError:
@@ -36,41 +36,45 @@ class Config:
     TANONG_LAT = 14.6542
     TANONG_LON = 120.9508
     
-    SIREN_PIN = 17
-    RAIN_GPIO_PIN = 27
-    WIND_GPIO_PIN = 22
+    # =========================================================================
+    # --- RASPBERRY PI 5 GPIO PINOUT DEFINITIONS (BCM NUMBERS) ---
+    # =========================================================================
+    SIREN_PIN = 17            # Relay / Siren Output (Physical Pin 11)
+    RAIN_GPIO_PIN = 27        # Digital Rain Sensor (Physical Pin 13)
+    WIND_GPIO_PIN = 22        # Anemometer Wind Sensor (Physical Pin 15)
+    
+    # LED Indicator Strip Pins
+    LED_GREEN_PIN = 23        # Tier 1 / Safe LED (Physical Pin 16)
+    LED_ORANGE_PIN = 24       # Tier 2 / Warning LED (Physical Pin 18)
+    LED_RED_PIN = 25          # Tier 3 / Danger LED (Physical Pin 22)
+    
+    # ST7565 LCD Screen Pins (Hardware SPI 0)
+    LCD_SPI_PORT = 0          # SPI Port 0
+    LCD_SPI_DEVICE = 0        # SPI Chip Select 0 (CS0 = GPIO 8 / Pin 24)
+    LCD_DC_PIN = 5            # RS / Data-Command Select (Physical Pin 29)
+    LCD_RST_PIN = 6           # RSE / Reset Pin (Physical Pin 31)
+    # Note: SCL (Clock) = GPIO 11 (Pin 23), SI (MOSI) = GPIO 10 (Pin 19)
+    # =========================================================================
+
     SIREN_TRIGGER_RAIN_PERCENT = 50
     SIREN_TRIGGER_WIND_KMH = 35.0
 
-    # --- LED STRIP PINS ---
-    LED_GREEN_PIN = 23
-    LED_ORANGE_PIN = 24
-    LED_RED_PIN = 25
-    
     STATE_FILE = "station_c_state.json"
     CAMERA_INDICES = [0, 1]
     
-    # =========================================================================
     # --- ROI (REGION OF INTEREST) BOX CONTROL ---
-    # =========================================================================
-    # Position offset relative to frame center (0,0 = exact middle of screen)
     ROI_OFFSET_X = 27       # Positive = shift right, Negative = shift left
     ROI_OFFSET_Y = -55      # Positive = shift down toward bottom curve of pipe
-    
-    # Independent box dimensions (pixels)
     ROI_WIDTH = 70         # Horizontal box width
     ROI_HEIGHT = 70        # Vertical box height
 
-    # =========================================================================
     # --- OPENCV COLOR THRESHOLDS (Scale: H 0-180, S 0-255, V 0-255) ---
-    # =========================================================================
     MIN_SATURATION = 20
     MIN_VALUE = 20
     
-    # Recalibrated to standard OpenCV 0-180 Hue bands:
-    RED_H_MIN, RED_H_MAX = 0, 20         # Pure Red band (also wraps at 170-180)
-    ORANGE_H_MIN, ORANGE_H_MAX = 21, 80  # Orange band (matches H=31 to H=33)
-    GREEN_H_MIN, GREEN_H_MAX = 81, 100    # Green band
+    RED_H_MIN, RED_H_MAX = 0, 20         # Pure Red band
+    ORANGE_H_MIN, ORANGE_H_MAX = 21, 80  # Orange band
+    GREEN_H_MIN, GREEN_H_MAX = 81, 100   # Green band
 
 class StateManager:
     @staticmethod
@@ -103,40 +107,44 @@ class LCDDisplay:
         self.device = None
         if LUMA_AVAILABLE:
             try:
-                # Initialize ST7565 over SPI using Luma
-                serial_interface = spi(port=0, device=0, gpio_DC=Config.LCD_DC_PIN, gpio_RST=Config.LCD_RST_PIN)
+                # Initialize ST7565 over Hardware SPI using Config pins
+                serial_interface = spi(
+                    port=Config.LCD_SPI_PORT, 
+                    device=Config.LCD_SPI_DEVICE, 
+                    gpio_DC=Config.LCD_DC_PIN, 
+                    gpio_RST=Config.LCD_RST_PIN
+                )
                 self.device = st7565(serial_interface)
                 self.font = ImageFont.load_default()
-                print("[INFO] LCD ST7565 Initialized via SPI.")
+                print("[INFO] ST7565 LCD Display initialized via SPI successfully.")
             except Exception as e:
-                print(f"[WARNING] LCD Initialization failed (Running headless): {e}")
+                print(f"[WARNING] LCD Display initialization failed (Running headless): {e}")
 
     def update_display(self, water_level, pred_rise, wind_kmh, camera_color):
         if self.device is None:
             return
         
-        # Create a blank canvas
+        # Create a monochrome image canvas
         image = Image.new("1", (self.device.width, self.device.height))
         draw = ImageDraw.Draw(image)
         
-        # --- UI LAYOUT MIRRORING STATION A ---
-        
-        # Row 1: Actual Water Level
+        # --- LCD DISPLAY LAYOUT ---
+        # Row 1: Water Tier Level
         draw.text((26, 2), "Actual Water level:", font=self.font, fill="white")
         draw.text((46, 12), f"{float(water_level):.2f} ft", font=self.font, fill="white")
         
-        # Row 2: Predicted Rise
+        # Row 2: 30-Minute Predicted Rise
         draw.text((32, 24), "Predicted Rise:", font=self.font, fill="white")
         draw.text((46, 34), f"{float(pred_rise):.2f} ft (L)", font=self.font, fill="white")
         
-        # Row 3: Wind Speed & Camera Color (Replaced TOF)
+        # Row 3: Environmental Wind & Optical Camera Reading
         draw.text((5, 46), "Wind Speed:", font=self.font, fill="white")
         draw.text((5, 56), f"{wind_kmh:.1f}km/h", font=self.font, fill="white")
         
         draw.text((66, 46), "Camera Color:", font=self.font, fill="white")
         draw.text((74, 56), f"{camera_color}", font=self.font, fill="white")
         
-        # Push image frame to hardware
+        # Push frame to LCD
         self.device.display(image)
 
 class HardwareInterface:
@@ -194,11 +202,11 @@ class HardwareInterface:
                     ret, frame = temp_cap.read()
                 
                 if ret and frame is not None and frame.size > 0:
-                    print(f"[SUCCESS] Logitech C270 initialized successfully at index {idx} (V4L2)")
+                    print(f"[SUCCESS] Logitech C270 camera initialized at index {idx}")
                     self.cap = temp_cap
                     return
                 temp_cap.release()
-        print("[ERROR] USB Camera not found. Ensure C270 is connected to USB.")
+        print("[ERROR] USB Camera not found. Ensure C270 is connected.")
 
     def read_rain(self):
         if self.gpio_available and self.rain_sensor:
@@ -292,7 +300,7 @@ class TelemetryController:
         self.hw = HardwareInterface()
         self.env = EnvironmentAPI()
         self.lstm = LSTMPredictor()
-        self.lcd = LCDDisplay()  
+        self.lcd = LCDDisplay()
         self.supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
         self.state = StateManager.load_state()
         self.offline_queue = deque(maxlen=50)
@@ -305,14 +313,12 @@ class TelemetryController:
     def process_frame(self, frame):
         height, width, _ = frame.shape
         
-        # Calculate dynamic box center with offsets
         cx = (width // 2) + Config.ROI_OFFSET_X
         cy = (height // 2) + Config.ROI_OFFSET_Y
         
         half_w = Config.ROI_WIDTH // 2
         half_h = Config.ROI_HEIGHT // 2
 
-        # Boundary checks
         x1 = max(0, cx - half_w)
         y1 = max(0, cy - half_h)
         x2 = min(width, cx + half_w)
@@ -324,7 +330,6 @@ class TelemetryController:
         mean_hsv = cv2.mean(hsv_roi)
         h, s, v = int(mean_hsv[0]), int(mean_hsv[1]), int(mean_hsv[2])
 
-        # Color classification logic using updated OpenCV 0-180 scale
         if s < Config.MIN_SATURATION or v < Config.MIN_VALUE:
             tier, color_name, status = self.state["water_tier"], "Unknown", "Low Light / Unknown"
         elif (Config.RED_H_MIN <= h <= Config.RED_H_MAX) or (h >= 170):
@@ -344,7 +349,6 @@ class TelemetryController:
                 self.state["actual_water_level_ft"] = float(tier)
             StateManager.save_state(self.state)
 
-        # Draw box and status overlay
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
         cv2.putText(frame, f"Color: {color_name}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         cv2.putText(frame, f"Status: {status}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
@@ -369,6 +373,7 @@ class TelemetryController:
             env = self.env.weather_data
             self.lstm.record_step(tier, rain_pct, env["om_temp"], env["rain_percent_api"])
 
+            # Push telemetry values to LCD Display
             self.lcd.update_display(tier, pred_rise, wind_kmh, current_color)
 
             time.sleep(1.0)
@@ -386,7 +391,6 @@ class TelemetryController:
         while True:
             time.sleep(3)
             with self.telemetry_lock:
-                # 1. Determine distance_data based on detected color / tier
                 tier = self.state["water_tier"]
                 if tier == 1:
                     dist_data = "0-1ft"
@@ -397,7 +401,6 @@ class TelemetryController:
                 else:
                     dist_data = "Unknown"
 
-                # 2. Determine prediction risk and label from LSTM output
                 pred_rise = self.state["predicted_rise_ft"]
                 if pred_rise <= 1.0:
                     pred_risk = 1
@@ -409,7 +412,6 @@ class TelemetryController:
                     pred_risk = 3
                     pred_label = "High Risk"
 
-                # 3. Build the payload matching the Supabase schema perfectly
                 payload = {
                     "detected_color": self.state["color"],
                     "water_tier": tier,
@@ -418,20 +420,17 @@ class TelemetryController:
                     "predicted_flood_risk": pred_risk,
                     "prediction_label": pred_label,
                     "predicted_rise_ft": float(pred_rise),
-                    "prediction_accuracy_pct": float(self.state["lstm_accuracy_pct"]) # Renamed to match your DB column
-                    # Removed om_temp and timestamp if they aren't explicitly in your Supabase schema, 
-                    # or you can keep them if your table has them (created_at handles the timestamp automatically).
+                    "prediction_accuracy_pct": float(self.state["lstm_accuracy_pct"])
                 }
             
             self.offline_queue.append(payload)
             
-            # Send batch to Supabase
             if len(self.offline_queue) > 0:
                 try:
                     data_to_send = list(self.offline_queue)
                     self.supabase.table("Station C").insert(data_to_send).execute()
                     self.offline_queue.clear()
-                    print(f"[CLOUD] Successfully synced {len(data_to_send)} record(s) to Supabase.")
+                    print(f"[CLOUD] Synced {len(data_to_send)} record(s) to 'Station C'.")
                 except Exception as e:
                     print(f"[CLOUD ERROR] Sync failed: {e}")
 
@@ -512,10 +511,9 @@ if __name__ == "__main__":
     print(f"\n{'='*55}")
     if controller.hw.cap is not None and controller.hw.cap.isOpened():
         print(f"[SUCCESS] Station C is running!")
-        print(f"[NETWORK] Access the Dashboard at: http://{local_ip}:{port}")
+        print(f"[NETWORK] Access Dashboard at: http://{local_ip}:{port}")
     else:
         print(f"[WARNING] Flask server started, but NO CAMERA DETECTED.")
-        print(f"[NETWORK] Network address hidden until camera is resolved.")
     print(f"{'='*55}\n")
     
     import logging
