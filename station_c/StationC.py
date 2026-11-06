@@ -1,4 +1,3 @@
-import glob
 import json
 import os
 import ssl
@@ -10,7 +9,7 @@ import numpy as np
 import cv2  # type: ignore
 from collections import deque
 from flask import Flask, Response, render_template_string  # type: ignore
-from supabase import Client, create_client  # type: ignore
+from supabase import create_client  # type: ignore
 
 # Suppress verbose TensorFlow and OpenCV warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -29,8 +28,8 @@ except ImportError:
     print("[WARNING] LCD libraries not found. Run: pip install luma.lcd luma.core Pillow")
 
 try:
-    import board #type: ignore
-    import neopixel #type: ignore
+    import board # type: ignore
+    import neopixel # type: ignore
     NEOPIXEL_AVAILABLE = True
 except ImportError:
     NEOPIXEL_AVAILABLE = False
@@ -56,11 +55,12 @@ class Config:
     LED_STRIP_COUNT = 8       # Change this to the number of LEDs on your strip
     LED_BRIGHTNESS = 0.5      # 0.0 (Off) to 1.0 (Max Brightness)
     
-    # ST7565 LCD Screen Pins (Hardware SPI 0)
+    # --- GMG12864-06D LCD Screen Pins (Hardware SPI 0) ---
+    # VDD/BLA -> 3.3V, GND/BLK -> GND, SDA -> GPIO10, SCL -> GPIO11
     LCD_SPI_PORT = 0          # SPI Port 0
-    LCD_SPI_DEVICE = 0        # SPI Chip Select 0 (CS0 = GPIO 8 / Pin 24)
-    LCD_DC_PIN = 5            # RS / Data-Command Select (Physical Pin 29)
-    LCD_RST_PIN = 6           # RSE / Reset Pin (Physical Pin 31)
+    LCD_SPI_DEVICE = 0        # SPI Chip Select 0 (CS/CE = GPIO 8 / Pin 24)
+    LCD_DC_PIN = 5            # RS/A0 / Data-Command Select (Physical Pin 29)
+    LCD_RST_PIN = 6           # RES/RST / Reset Pin (Physical Pin 31)
     # =========================================================================
 
     SIREN_TRIGGER_RAIN_PERCENT = 50
@@ -69,6 +69,7 @@ class Config:
     STATE_FILE = "station_c_state.json"
     CAMERA_INDICES = [0, 1]
     
+    # Computer Vision / ROI Configurations
     ROI_OFFSET_X = 27
     ROI_OFFSET_Y = -55
     ROI_WIDTH = 70
@@ -118,9 +119,10 @@ class LCDDisplay:
                     gpio_DC=Config.LCD_DC_PIN, 
                     gpio_RST=Config.LCD_RST_PIN
                 )
-                self.device = st7565(serial_interface)
+                # Note: Adjust contrast (0-255) if screen is too dark or light
+                self.device = st7565(serial_interface, contrast=150)
                 self.font = ImageFont.load_default()
-                print("[INFO] ST7565 LCD Display initialized via SPI successfully.")
+                print("[INFO] GMG12864-06D (ST7565) LCD Display initialized successfully.")
             except Exception as e:
                 print(f"[WARNING] LCD Display initialization failed: {e}")
 
@@ -138,7 +140,7 @@ class LCDDisplay:
         draw.text((46, 34), f"{float(pred_rise):.2f} ft (L)", font=self.font, fill="white")
         
         draw.text((5, 46), "Wind Speed:", font=self.font, fill="white")
-        draw.text((5, 56), f"{wind_kmh:.1f}km/h", font=self.font, fill="white")
+        draw.text((5, 56), f"{wind_kmh:.1f} km/h", font=self.font, fill="white")
         
         draw.text((66, 46), "Camera Color:", font=self.font, fill="white")
         draw.text((74, 56), f"{camera_color}", font=self.font, fill="white")
@@ -168,10 +170,8 @@ class HardwareInterface:
         except Exception:
             print("[WARNING] GPIO Initialization skipped. Running in simulation mode.")
 
-        # Initialize Addressable LED Strip
         if NEOPIXEL_AVAILABLE:
             try:
-                # Map the Config pin to the board (e.g. board.D18)
                 pin = getattr(board, f"D{Config.LED_STRIP_SIGNAL_PIN}")
                 self.led_strip = neopixel.NeoPixel(
                     pin, 
@@ -179,7 +179,7 @@ class HardwareInterface:
                     brightness=Config.LED_BRIGHTNESS, 
                     auto_write=False
                 )
-                self.led_strip.fill((0, 0, 0)) # Start turned off
+                self.led_strip.fill((0, 0, 0))
                 self.led_strip.show()
                 print(f"[INFO] LED Strip initialized on GPIO {Config.LED_STRIP_SIGNAL_PIN}")
             except Exception as e:
@@ -189,13 +189,12 @@ class HardwareInterface:
         if not self.led_strip:
             return
 
-        # Assign color based on tier (RGB format)
         if tier == 1:
-            color = (0, 255, 0)     # Green for Safe
+            color = (0, 255, 0)     # Green
         elif tier == 2:
-            color = (255, 128, 0)   # Orange for Warning
+            color = (255, 128, 0)   # Orange
         elif tier >= 3:
-            color = (255, 0, 0)     # Red for Danger
+            color = (255, 0, 0)     # Red
         else:
             color = (0, 0, 0)       # Off
 
@@ -214,11 +213,11 @@ class HardwareInterface:
                     ret, frame = temp_cap.read()
                 
                 if ret and frame is not None and frame.size > 0:
-                    print(f"[SUCCESS] Logitech C270 camera initialized at index {idx}")
+                    print(f"[SUCCESS] USB Camera initialized at index {idx}")
                     self.cap = temp_cap
                     return
                 temp_cap.release()
-        print("[ERROR] USB Camera not found. Ensure C270 is connected.")
+        print("[ERROR] USB Camera not found.")
 
     def read_rain(self):
         if self.gpio_available and self.rain_sensor:
@@ -381,14 +380,12 @@ class TelemetryController:
             trigger_siren = (tier >= 3) or (rain_pct >= Config.SIREN_TRIGGER_RAIN_PERCENT) or (wind_kmh >= Config.SIREN_TRIGGER_WIND_KMH)
             self.hw.set_siren(trigger_siren)
             
-            # Pass the tier to the new LED Strip function
             self.hw.set_led_strip(tier)
 
             env = self.env.weather_data
             self.lstm.record_step(tier, rain_pct, env["om_temp"], env["rain_percent_api"])
 
             self.lcd.update_display(tier, pred_rise, wind_kmh, current_color)
-
             time.sleep(1.0)
 
     def _lstm_loop(self):
