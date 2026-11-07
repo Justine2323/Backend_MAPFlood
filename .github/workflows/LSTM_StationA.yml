@@ -29,4 +29,6 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python station_a/StationA.py
+        run: 
+          python -m pip install matplotlib pandas numpy requests scikit-learn tensorflow supabase
+          python station_a/StationA.py
