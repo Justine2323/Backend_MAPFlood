@@ -7,6 +7,7 @@ from supabase import create_client, Client
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential # type: ignore
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Input # type: ignore
+from sklearn.preprocessing import StandardScaler
 
 # ============================================================================
 # CONFIGURATION
@@ -65,9 +66,11 @@ def get_risk_label(predicted_level, current_level):
         return 0, "SAFE"
 
 def run_prediction():
-    scaler = MinMaxScaler()
+    # 1. Use StandardScaler instead of MinMaxScaler for better trend extrapolation
+    scaler = StandardScaler()
     
-    response = supabase.table(TABLE_NAME).select("*").order("id", desc=True).limit(500).execute()
+    # 2. Increase data limit to 3000 (~4 hours of history) to establish a trend line
+    response = supabase.table(TABLE_NAME).select("*").order("id", desc=True).limit(3000).execute()
     data = response.data
     
     if not data or len(data) < LOOKBACK_STEPS + 1:
@@ -118,7 +121,9 @@ def run_prediction():
         return
 
     model = build_lstm_model((X.shape[1], X.shape[2]))
-    history = model.fit(X, y, epochs=3, batch_size=4, verbose=0)
+    
+    # 3. Increase epochs and batch size so the LSTM actually learns the slope
+    history = model.fit(X, y, epochs=10, batch_size=16, verbose=0)
     
     loss_mae = float(history.history['mae'][-1]) if 'mae' in history.history else 0.05
     accuracy_pct = round(float(np.clip((1.0 - loss_mae) * 100.0, 75.0, 99.5)), 2)
@@ -131,7 +136,12 @@ def run_prediction():
     predicted_water_level_ft = float(scaler.inverse_transform(dummy)[0, 0])
     
     current_water_level_ft = float(df['calculated_water_level_ft'].iloc[-1])
-    predicted_rise_ft = max(0.0, float(predicted_water_level_ft - current_water_level_ft))
+    
+    # Debug print to show you exactly what the raw prediction is before it gets clipped
+    raw_rise = predicted_water_level_ft - current_water_level_ft
+    print(f"[DEBUG] Raw predicted level: {predicted_water_level_ft:.3f}ft | Raw calculated rise: {raw_rise:.3f}ft")
+    
+    predicted_rise_ft = max(0.0, float(raw_rise))
     
     risk_code, risk_label = get_risk_label(predicted_water_level_ft, current_water_level_ft)
     
@@ -148,7 +158,7 @@ def run_prediction():
     for row_id in target_ids:
         supabase.table(TABLE_NAME).update(update_payload).eq("id", int(row_id)).execute()
         
-    print(f"[{pd.Timestamp.now().strftime('%H:%M:%S')}] Backfilled {len(target_ids)} row(s) | Current: {current_water_level_ft:.2f}ft | 30m Pred Rise: {predicted_rise_ft:.2f}ft | Status: {risk_label}")
+    print(f"[{pd.Timestamp.now().strftime('%H:%M:%S')}] Backfilled {len(target_ids)} row(s) | Current: {current_water_level_ft:.3f}ft | 30m Pred Rise: {predicted_rise_ft:.3f}ft | Status: {risk_label}")
 
 if __name__ == "__main__":
     print(f"[SYSTEM] Prediction task started on '{TABLE_NAME}'.")
