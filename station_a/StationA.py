@@ -141,7 +141,7 @@ def run_prediction():
     if predicted_water_level_ft <= 0.0:
         predicted_water_level_ft = 0.001 
         
-    predicted_rise_ft = float(raw_rise)
+    predicted_rise_ft = max(0.0, float(raw_rise))
     
     # Ensure rise never perfectly reads 0.00
     if predicted_rise_ft == 0.0:
