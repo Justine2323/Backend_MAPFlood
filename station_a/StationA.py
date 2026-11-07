@@ -3,11 +3,14 @@ import time
 import numpy as np
 import pandas as pd
 import requests
-import matplotlib.pyplot as plt # Added for graphing
 from supabase import create_client, Client
 from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Sequential # type: ignore
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Input # type: ignore
+
+import matplotlib
+matplotlib.use('Agg') 
+import matplotlib.pyplot as plt # Now it is safe to import
 
 # ============================================================================
 # CONFIGURATION
