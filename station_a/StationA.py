@@ -141,12 +141,12 @@ def run_prediction():
     raw_rise = predicted_water_level_ft - current_water_level_ft
     print(f"[DEBUG] Raw predicted level: {predicted_water_level_ft:.3f}ft | Raw calculated rise: {raw_rise:.3f}ft")
     
-    predicted_rise_ft = max(0.0, float(raw_rise))
+    predicted_rise_ft = float(raw_rise)
     
     risk_code, risk_label = get_risk_label(predicted_water_level_ft, current_water_level_ft)
     
     update_payload = {
-        "predicted_rise_ft": round(predicted_rise_ft, 2),
+        "predicted_rise_ft": round(predicted_rise_ft, 4),
         "predicted_flood_risk": risk_code,
         "prediction_label": risk_label,
         "prediction_accuracy_pct": accuracy_pct
