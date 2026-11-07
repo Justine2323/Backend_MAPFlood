@@ -5,4 +5,3 @@ supabase
 numpy
 scikit-learn
 joblib
-matplotlib
