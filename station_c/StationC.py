@@ -18,9 +18,12 @@ os.environ['OPENCV_LOG_LEVEL'] = 'FATAL'
 from tensorflow.keras.models import Sequential  # type: ignore
 from tensorflow.keras.layers import LSTM, Dense, Input  # type: ignore
 
+# -----------------------------------------------------------------------------
+# HARDWARE DRIVER IMPORTS
+# -----------------------------------------------------------------------------
 try:
     from luma.core.interface.serial import spi  # type: ignore
-    from luma.lcd.device import st7565  # type: ignore
+    from luma.lcd.device import uc1701x  # type: ignore  <-- Confirmed match for GMG12864-06D
     from PIL import Image, ImageDraw, ImageFont
     LUMA_AVAILABLE = True
 except ImportError:
@@ -28,13 +31,17 @@ except ImportError:
     print("[WARNING] LCD libraries not found. Run: pip install luma.lcd luma.core Pillow")
 
 try:
-    import board # type: ignore
-    import neopixel # type: ignore
+    import board  # type: ignore
+    import neopixel  # type: ignore
     NEOPIXEL_AVAILABLE = True
 except ImportError:
     NEOPIXEL_AVAILABLE = False
     print("[WARNING] NeoPixel libraries not found. Run: pip install adafruit-circuitpython-neopixel")
 
+
+# -----------------------------------------------------------------------------
+# CONFIGURATION
+# -----------------------------------------------------------------------------
 class Config:
     SUPABASE_URL = "https://jqhimswayyurxymltrxn.supabase.co"
     SUPABASE_KEY = "sb_publishable_OeO0MsX7Aoa4bYlA8NhbZw_-JmxsF0S"
@@ -52,11 +59,11 @@ class Config:
     
     # --- ADDRESSABLE LED STRIP CONFIGURATION ---
     LED_STRIP_SIGNAL_PIN = 18 # Signal pin for LED Strip (Physical Pin 12 / PWM0)
-    LED_STRIP_COUNT = 8       # Change this to the number of LEDs on your strip
+    LED_STRIP_COUNT = 24      # Total number of LEDs on your strip
+    LED_CHASE_SIZE = 4        # Number of active running LEDs in the chase sequence
     LED_BRIGHTNESS = 0.5      # 0.0 (Off) to 1.0 (Max Brightness)
     
     # --- GMG12864-06D LCD Screen Pins (Hardware SPI 0) ---
-    # VDD/BLA -> 3.3V, GND/BLK -> GND, SDA -> GPIO10, SCL -> GPIO11
     LCD_SPI_PORT = 0          # SPI Port 0
     LCD_SPI_DEVICE = 0        # SPI Chip Select 0 (CS/CE = GPIO 8 / Pin 24)
     LCD_DC_PIN = 5            # RS/A0 / Data-Command Select (Physical Pin 29)
@@ -82,6 +89,10 @@ class Config:
     ORANGE_H_MIN, ORANGE_H_MAX = 21, 80
     GREEN_H_MIN, GREEN_H_MAX = 81, 100
 
+
+# -----------------------------------------------------------------------------
+# STATE MANAGEMENT
+# -----------------------------------------------------------------------------
 class StateManager:
     @staticmethod
     def load_state():
@@ -108,6 +119,10 @@ class StateManager:
         except Exception:
             pass
 
+
+# -----------------------------------------------------------------------------
+# LCD DISPLAY CONTROLLER (UC1701X)
+# -----------------------------------------------------------------------------
 class LCDDisplay:
     def __init__(self):
         self.device = None
@@ -119,10 +134,11 @@ class LCDDisplay:
                     gpio_DC=Config.LCD_DC_PIN, 
                     gpio_RST=Config.LCD_RST_PIN
                 )
-                # Note: Adjust contrast (0-255) if screen is too dark or light
-                self.device = st7565(serial_interface, contrast=150)
+                # GMG12864-06D uses UC1701X controller; set optimal contrast
+                self.device = uc1701x(serial_interface, rotate=2)
+                self.device.contrast(70)  # Adjust to 60-85 if screen is too dark/faint
                 self.font = ImageFont.load_default()
-                print("[INFO] GMG12864-06D (ST7565) LCD Display initialized successfully.")
+                print("[INFO] GMG12864-06D (UC1701X) LCD Display initialized successfully.")
             except Exception as e:
                 print(f"[WARNING] LCD Display initialization failed: {e}")
 
@@ -130,23 +146,22 @@ class LCDDisplay:
         if self.device is None:
             return
         
+        # Create 1-bit monochrome pixel canvas (128x64)
         image = Image.new("1", (self.device.width, self.device.height))
         draw = ImageDraw.Draw(image)
         
-        draw.text((26, 2), "Actual Water level:", font=self.font, fill="white")
-        draw.text((46, 12), f"{float(water_level):.2f} ft", font=self.font, fill="white")
-        
-        draw.text((32, 24), "Predicted Rise:", font=self.font, fill="white")
-        draw.text((46, 34), f"{float(pred_rise):.2f} ft (L)", font=self.font, fill="white")
-        
-        draw.text((5, 46), "Wind Speed:", font=self.font, fill="white")
-        draw.text((5, 56), f"{wind_kmh:.1f} km/h", font=self.font, fill="white")
-        
-        draw.text((66, 46), "Camera Color:", font=self.font, fill="white")
-        draw.text((74, 56), f"{camera_color}", font=self.font, fill="white")
+        # Clear, multi-line telemetry presentation
+        draw.text((0, 0),  f"Level: {float(water_level):.2f} ft", font=self.font, fill="white")
+        draw.text((0, 16), f"Pred:  {float(pred_rise):.2f} ft", font=self.font, fill="white")
+        draw.text((0, 32), f"Wind:  {wind_kmh:.1f} km/h", font=self.font, fill="white")
+        draw.text((0, 48), f"Color: {camera_color}", font=self.font, fill="white")
         
         self.device.display(image)
 
+
+# -----------------------------------------------------------------------------
+# HARDWARE INTERFACE (GPIO, LED CHASE, CAMERA)
+# -----------------------------------------------------------------------------
 class HardwareInterface:
     def __init__(self):
         self.gpio_available = False
@@ -155,8 +170,15 @@ class HardwareInterface:
         self.wind_sensor = None
         self.cap = None
         self.led_strip = None
+        self.current_tier = 0
+        self.chase_index = 0
+        
         self._init_gpio()
         self._init_camera()
+        
+        # Continuous background thread for the 4-LED running chase
+        if NEOPIXEL_AVAILABLE and self.led_strip:
+            threading.Thread(target=self._led_chase_loop, daemon=True).start()
 
     def _init_gpio(self):
         try:
@@ -185,21 +207,45 @@ class HardwareInterface:
             except Exception as e:
                 print(f"[WARNING] LED Strip init failed (Try running script with sudo): {e}")
 
-    def set_led_strip(self, tier: int):
-        if not self.led_strip:
-            return
+    def set_led_tier(self, tier: int):
+        self.current_tier = tier
 
-        if tier == 1:
-            color = (0, 255, 0)     # Green
-        elif tier == 2:
-            color = (255, 128, 0)   # Orange
-        elif tier >= 3:
-            color = (255, 0, 0)     # Red
-        else:
-            color = (0, 0, 0)       # Off
+    def _led_chase_loop(self):
+        """Continuously shifts a 4-pixel running chase sequence along the strip."""
+        while True:
+            if not self.led_strip:
+                time.sleep(0.5)
+                continue
 
-        self.led_strip.fill(color)
-        self.led_strip.show()
+            tier = self.current_tier
+
+            # Set LED color profile by tier
+            if tier == 1:
+                color = (0, 255, 0)     # Green
+            elif tier == 2:
+                color = (255, 128, 0)   # Orange
+            elif tier >= 3:
+                color = (255, 0, 0)     # Red
+            else:
+                color = (0, 0, 0)       # Off
+
+            if color == (0, 0, 0):
+                self.led_strip.fill((0, 0, 0))
+                self.led_strip.show()
+                time.sleep(0.2)
+                continue
+
+            # Clear full strip
+            self.led_strip.fill((0, 0, 0))
+
+            # Light 4 consecutive running LEDs
+            for offset in range(Config.LED_CHASE_SIZE):
+                pixel_pos = (self.chase_index + offset) % Config.LED_STRIP_COUNT
+                self.led_strip[pixel_pos] = color
+
+            self.led_strip.show()
+            self.chase_index = (self.chase_index + 1) % Config.LED_STRIP_COUNT
+            time.sleep(0.08)  # Chase animation delay
 
     def _init_camera(self):
         for idx in Config.CAMERA_INDICES:
@@ -242,6 +288,10 @@ class HardwareInterface:
         if self.gpio_available and self.siren:
             self.siren.on() if state else self.siren.off()
 
+
+# -----------------------------------------------------------------------------
+# WEATHER API SYNCHRONIZER
+# -----------------------------------------------------------------------------
 class EnvironmentAPI:
     def __init__(self):
         self.weather_data = {
@@ -270,6 +320,10 @@ class EnvironmentAPI:
                 pass
             time.sleep(600)
 
+
+# -----------------------------------------------------------------------------
+# LOCAL LSTM PREDICTION ENGINE
+# -----------------------------------------------------------------------------
 class LSTMPredictor:
     def __init__(self):
         self.sequence_length = 6
@@ -306,6 +360,10 @@ class LSTMPredictor:
         raw_pred = self.model.predict(recent_seq, verbose=0)[0][0]
         return int(round(max(0, min(3, raw_pred))))
 
+
+# -----------------------------------------------------------------------------
+# MAIN TELEMETRY CONTROLLER & CLOUD SYNC
+# -----------------------------------------------------------------------------
 class TelemetryController:
     def __init__(self):
         self.hw = HardwareInterface()
@@ -380,11 +438,13 @@ class TelemetryController:
             trigger_siren = (tier >= 3) or (rain_pct >= Config.SIREN_TRIGGER_RAIN_PERCENT) or (wind_kmh >= Config.SIREN_TRIGGER_WIND_KMH)
             self.hw.set_siren(trigger_siren)
             
-            self.hw.set_led_strip(tier)
+            # Send current tier to LED chase thread
+            self.hw.set_led_tier(tier)
 
             env = self.env.weather_data
             self.lstm.record_step(tier, rain_pct, env["om_temp"], env["rain_percent_api"])
 
+            # Refresh LCD screen
             self.lcd.update_display(tier, pred_rise, wind_kmh, current_color)
             time.sleep(1.0)
 
@@ -444,8 +504,13 @@ class TelemetryController:
                 except Exception as e:
                     print(f"[CLOUD ERROR] Sync failed: {e}")
 
+
+# -----------------------------------------------------------------------------
+# FLASK WEB DASHBOARD & ENTRY POINT
+# -----------------------------------------------------------------------------
 app = Flask(__name__)
 controller = TelemetryController()
+
 
 def frame_generator():
     while True:
@@ -463,6 +528,7 @@ def frame_generator():
         ret, buffer = cv2.imencode(".jpg", frame)
         if ret:
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n")
+
 
 @app.route("/")
 def dashboard():
@@ -489,9 +555,11 @@ def dashboard():
         </html>
     """)
 
+
 @app.route("/video_feed")
 def video_feed():
     return Response(frame_generator(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
 
 def get_local_ip():
     try:
@@ -503,6 +571,7 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
+
 def find_free_port(start_port):
     for port in range(start_port, start_port + 10):
         try:
@@ -513,6 +582,7 @@ def find_free_port(start_port):
         except OSError:
             continue
     return start_port
+
 
 if __name__ == "__main__":
     local_ip = get_local_ip()
