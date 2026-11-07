@@ -1,6 +1,8 @@
 tensorflow-cpu
-supabase
 pandas
+requests
+supabase
 numpy
 scikit-learn
 joblib
+matplotlib
