@@ -8,10 +8,6 @@ from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Sequential # type: ignore
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Input # type: ignore
 
-import matplotlib
-matplotlib.use('Agg') 
-import matplotlib.pyplot as plt # Now it is safe to import
-
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -170,41 +166,13 @@ def run_prediction():
     print(f"[{pd.Timestamp.now().strftime('%H:%M:%S')}] Backfilled {len(target_ids)} row(s) | Current: {current_water_level_ft:.3f}ft | 30m Pred Rise: {predicted_rise_ft:.3f}ft | Status: {risk_label}")
 
     # ---------------------------------------------------------
-    # GENERATE DATA TABLE (CONSOLE) & GRAPH (PNG IMAGE)
+    # GENERATE DATA TABLE (CONSOLE)
     # ---------------------------------------------------------
     print("\n[DATA TABLE] Recent Sensor Activity Used for Prediction:")
     # Print the last 5 readings used to influence this prediction
     recent_data = df[['id', 'calculated_water_level_ft', 'rain_percent', 'wind_speed_kmh', 'om_rain']].tail(5)
     print(recent_data.to_markdown(index=False))
     print("\n")
-
-    try:
-        plt.figure(figsize=(10, 5))
-        past_points = 60 # Visualizing the last ~5 minutes of data
-        
-        x_actual = df['id'].tail(past_points)
-        y_actual = df['calculated_water_level_ft'].tail(past_points)
-        
-        plt.plot(x_actual, y_actual, label='Actual Water Level (ft)', color='blue', linewidth=2)
-        
-        # Plot the predicted point in the future
-        future_id = df['id'].iloc[-1] + STEPS_AHEAD
-        plt.scatter([future_id], [predicted_water_level_ft], color='red', s=100, label='+30 Mins Prediction', zorder=5)
-        
-        # Draw a dotted line connecting the current time to the prediction
-        plt.plot([df['id'].iloc[-1], future_id], [current_water_level_ft, predicted_water_level_ft], 'r--', alpha=0.5)
-
-        plt.title(f"Flood Prediction Output (Status: {risk_label})")
-        plt.xlabel("Database Row ID (Time)")
-        plt.ylabel("Water Level (ft)")
-        plt.legend()
-        plt.grid(True, linestyle='--', alpha=0.6)
-        
-        plt.savefig("flood_prediction_graph.png", bbox_inches='tight')
-        plt.close()
-        print("[INFO] Saved interpretation graph to 'flood_prediction_graph.png'")
-    except Exception as e:
-        print(f"[WARNING] Could not generate graph: {e}")
 
 if __name__ == "__main__":
     print(f"[SYSTEM] Prediction task started on '{TABLE_NAME}'.")
